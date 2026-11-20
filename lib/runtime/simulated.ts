@@ -143,6 +143,10 @@ export const simulatedDriver: RuntimeDriver = {
     if (instance) beginStop(instance, Date.now())
   },
 
+  async destroy(world: World): Promise<void> {
+    instances().delete(world.id)
+  },
+
   async state(world: World): Promise<RuntimeState> {
     return advance(world.id, Date.now())?.phase ?? 'stopped'
   },

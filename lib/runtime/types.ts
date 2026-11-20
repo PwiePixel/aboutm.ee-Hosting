@@ -40,6 +40,8 @@ export interface RuntimeDriver {
   readonly preview: boolean
   start(world: World): Promise<void>
   stop(world: World): Promise<void>
+  /** Beendet den Server sofort und räumt alles weg, was der Treiber für die Welt angelegt hat. */
+  destroy(world: World): Promise<void>
   state(world: World): Promise<RuntimeState>
   /** 0 = Server wird gestartet, 1 = Paper wird vorbereitet, 2 = Welt wird geladen. */
   startupStep(world: World): Promise<number>

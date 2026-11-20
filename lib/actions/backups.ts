@@ -16,9 +16,9 @@ async function owned(worldId: unknown): Promise<World> {
   return world
 }
 
-function attempt(world: World, run: () => void, ok?: string): ActionState {
+async function attempt(world: World, run: () => void | Promise<void>, ok?: string): Promise<ActionState> {
   try {
-    run()
+    await run()
   } catch (error) {
     if (error instanceof BackupError) return { error: error.message }
     console.error(`[aboutm.ee] Backups von ${world.id}:`, error)
@@ -30,11 +30,14 @@ function attempt(world: World, run: () => void, ok?: string): ActionState {
 
 export async function createBackupAction(worldId: string): Promise<ActionState> {
   const world = await owned(worldId)
+  // Nur wenn die Dateien in Ruhe sind: pausiert — oder online, dann hält der Server das Speichern kurz an.
+  // Während des Startens oder Pausierens schreibt der Server gerade, das gäbe einen halben Stand.
+  if (world.status !== 'paused' && world.status !== 'online') {
+    return { error: 'Warte kurz, bis deine Welt fertig gestartet oder pausiert ist — dann klappt das Backup.' }
+  }
   if (!allowAttempt(`backup:${world.user_id}`, 10, 60 * 60 * 1000)) {
     return { error: 'Du hast gerade viele Backups erstellt. Versuch es später noch einmal.' }
   }
-  // Läuft die Welt, muss der Server erst alles auf die Platte schreiben und das Speichern
-  // kurz anhalten — sonst landet ein halb geschriebener Stand im Backup.
   const live = world.status === 'online'
   try {
     if (live) {
@@ -42,7 +45,7 @@ export async function createBackupAction(worldId: string): Promise<ActionState> 
       await sendCommand(world, 'save-all flush')
       await new Promise((resolve) => setTimeout(resolve, 4000))
     }
-    return attempt(world, () => void createBackup(world, 'manual'), 'Backup erstellt.')
+    return await attempt(world, async () => void (await createBackup(world, 'manual')), 'Backup erstellt.')
   } catch (error) {
     console.error(`[aboutm.ee] Backup von ${world.id} vorbereiten:`, error)
     return { error: 'Das hat nicht geklappt. Versuch es gleich noch einmal.' }

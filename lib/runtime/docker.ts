@@ -4,6 +4,7 @@ import { config } from '../config'
 import { db } from '../db'
 import { findVersion } from '../versions'
 import { cleanOutput, demux, docker, exec, expectOk, json } from './docker-api'
+import { removeTree, withDir } from '../safe-fs'
 import type { RuntimeDriver, RuntimeState, RuntimeStats, World } from './types'
 
 /**
@@ -15,6 +16,10 @@ import type { RuntimeDriver, RuntimeState, RuntimeStats, World } from './types'
 type Memory = {
   /** Läuft, solange Image geladen und Container angelegt wird. */
   launching: boolean
+  /** Während des Anlegens kam ein Stopp: Der Container wird dann gleich wieder entfernt statt gestartet. */
+  cancelled: boolean
+  /** Die Welt wurde währenddessen gelöscht: danach auch den Ordner wieder entfernen, den Docker angelegt hat. */
+  destroyed: boolean
   stopping: boolean
   online: boolean
   lastError: string | null
@@ -30,7 +35,17 @@ function memoryOf(worldId: string): Memory {
   globals.__amDocker ??= new Map()
   let memory = globals.__amDocker.get(worldId)
   if (!memory) {
-    memory = { launching: false, stopping: false, online: false, lastError: null, logs: null, players: null, cpu: null }
+    memory = {
+      launching: false,
+      cancelled: false,
+      destroyed: false,
+      stopping: false,
+      online: false,
+      lastError: null,
+      logs: null,
+      players: null,
+      cpu: null,
+    }
     globals.__amDocker.set(worldId, memory)
   }
   return memory
@@ -38,6 +53,25 @@ function memoryOf(worldId: string): Memory {
 
 function forget(worldId: string): void {
   globals.__amDocker?.delete(worldId)
+}
+
+/**
+ * Liest die Namen aus der Antwort auf „list“, z. B. „There are 2 of a max of 20 players online: Steve, Alex“.
+ * Die Ausgabe stammt vom Server des Nutzers und ist damit nicht vertrauenswürdig: nur gültige
+ * Minecraft-Namen, jeder einmal, und nie mehr als es Spielerplätze gibt.
+ */
+export function parsePlayerList(output: string): string[] {
+  const match = /players online:(.*)$/m.exec(output)
+  const names = new Map<string, string>()
+  for (const raw of (match?.[1] ?? '').split(',')) {
+    // Plugins hängen gern Ränge davor („[Admin] Steve“) — der Name ist das letzte Wort.
+    const name = raw.trim().split(/\s+/).pop() ?? ''
+    // Bedrock-Spieler über Geyser/Floodgate tragen ein Präfix wie „.“ oder „*“.
+    if (!/^[.*]?[A-Za-z0-9_]{2,16}$/.test(name)) continue
+    if (!names.has(name.toLowerCase())) names.set(name.toLowerCase(), name)
+    if (names.size >= config.maxPlayers) break
+  }
+  return [...names.values()]
 }
 
 export function containerName(world: Pick<World, 'id'>): string {
@@ -48,6 +82,8 @@ const LOG_TAIL = 400
 const STOP_SECONDS = 120
 // Die Spielerabfrage läuft über RCON und würde das Log sonst alle paar Sekunden füllen.
 const RCON_NOISE = /Thread RCON Client .* (started|shutting down)/
+const PLAYERS_FRESH_MS = 10_000
+const PLAYERS_STALE_MS = 30_000
 const READY = /\bDone \(\d[\d.,]*s\)!/
 
 function imageFor(world: World): string {
@@ -61,13 +97,10 @@ function whitelistNames(worldId: string): string[] {
 }
 
 /** Der Server läuft im Container als eigener Benutzer — ihm müssen die Dateien gehören. */
-function chownTree(target: string, uid: number, gid: number): void {
-  const stat = fs.lstatSync(target, { throwIfNoEntry: false })
-  if (!stat || stat.isSymbolicLink()) return
-  if (stat.uid !== uid || stat.gid !== gid) fs.chownSync(target, uid, gid)
-  if (stat.isDirectory()) {
-    for (const entry of fs.readdirSync(target)) chownTree(path.join(target, entry), uid, gid)
-  }
+function chownWorld(dir: string): void {
+  if (process.getuid?.() !== 0) return
+  // Über lib/safe-fs: ändert Links selbst statt ihr Ziel und verlässt den Weltordner nie.
+  withDir(dir, [], (root) => root.chownTree({ uid: config.docker.uid, gid: config.docker.gid }))
 }
 
 async function ensureNetwork(): Promise<void> {
@@ -156,6 +189,9 @@ function containerSpec(world: World): Record<string, unknown> {
       'mc-router.network': config.docker.network,
     },
     StopTimeout: STOP_SECONDS,
+    // Die eingebaute Prüfung des Images spricht kein PROXY-Protokoll und würde den Server dauerhaft als
+    // „unhealthy“ melden. Ob er bereit ist, erkennt der Treiber selbst (siehe state()).
+    Healthcheck: { Test: ['NONE'] },
     HostConfig: {
       Binds: [`${path.join(config.docker.hostDataDir, 'worlds', world.id)}:/data`],
       NetworkMode: config.docker.network,
@@ -175,10 +211,11 @@ async function launch(world: World): Promise<void> {
   const name = containerName(world)
   const dir = path.join(config.dataDir, 'worlds', world.id)
   fs.mkdirSync(dir, { recursive: true })
-  if (process.getuid?.() === 0) chownTree(dir, config.docker.uid, config.docker.gid)
 
   await ensureNetwork()
+  // Erst einen etwaigen alten Container entfernen: Solange einer läuft, darf niemand am Besitz der Dateien drehen.
   await removeContainer(name)
+  chownWorld(dir)
 
   const spec = containerSpec(world)
   let created = await docker('POST', `/containers/create?name=${name}`, { body: spec })
@@ -190,7 +227,7 @@ async function launch(world: World): Promise<void> {
   expectOk(await docker('POST', `/containers/${name}/start`), 'Container starten', [304])
 }
 
-type Inspect = { State: { Running: boolean; Health?: { Status: string } } }
+type Inspect = { State: { Running: boolean } }
 
 async function fetchLogs(world: World, memory: Memory): Promise<string[]> {
   const now = Date.now()
@@ -205,6 +242,33 @@ async function fetchLogs(world: World, memory: Memory): Promise<string[]> {
   return lines
 }
 
+/** Bereit ist der Server, sobald er „Done“ meldet — oder, falls diese Zeile schon aus dem Log gerutscht ist, sobald er auf Befehle antwortet. */
+async function isReady(world: World, memory: Memory): Promise<boolean> {
+  if ((await fetchLogs(world, memory)).some((line) => READY.test(line))) return true
+  try {
+    const { exitCode, output } = await exec(containerName(world), ['rcon-cli', 'list'], 4000)
+    return exitCode === 0 && /players online/.test(output)
+  } catch {
+    return false
+  }
+}
+
+function sendStop(world: World, memory: Memory): void {
+  memory.stopping = true
+  docker('POST', `/containers/${containerName(world)}/stop?t=${STOP_SECONDS}`, {
+    timeoutMs: (STOP_SECONDS + 30) * 1000,
+  })
+    .then((response) => {
+      // 204 gestoppt, 304 lief schon nicht mehr, 404 gibt es nicht mehr — alles andere ist ein Fehlschlag.
+      if (![204, 304, 404].includes(response.status)) throw new Error(`HTTP ${response.status}`)
+    })
+    .catch((error: unknown) => {
+      console.error(`[aboutm.ee] Stoppen von ${world.id}:`, error)
+      // Nicht als „stoppt“ stehen lassen: Der Taktgeber sieht den Server dann wieder laufen und stößt den Stopp erneut an.
+      memory.stopping = false
+    })
+}
+
 export const dockerDriver: RuntimeDriver = {
   name: 'docker',
   preview: false,
@@ -212,29 +276,56 @@ export const dockerDriver: RuntimeDriver = {
   async start(world: World): Promise<void> {
     const memory = memoryOf(world.id)
     if (memory.launching) return
-    Object.assign(memory, { launching: true, stopping: false, online: false, lastError: null, logs: null, players: null, cpu: null })
+    Object.assign(memory, {
+      launching: true,
+      cancelled: false,
+      destroyed: false,
+      stopping: false,
+      online: false,
+      lastError: null,
+      logs: null,
+      players: null,
+      cpu: null,
+    })
     // Image laden kann beim ersten Mal Minuten dauern — deshalb nicht darauf warten.
     launch(world)
+      .then(async () => {
+        // Kam währenddessen ein Stopp, wird der frisch angelegte Container gleich wieder entfernt.
+        if (memory.cancelled) await removeContainer(containerName(world))
+        if (memory.destroyed) removeTree(path.join(config.dataDir, 'worlds', world.id))
+      })
       .catch((error: unknown) => {
         memory.lastError = error instanceof Error ? error.message : String(error)
         console.error(`[aboutm.ee] Start von ${world.id} fehlgeschlagen:`, memory.lastError)
       })
       .finally(() => {
         memory.launching = false
+        memory.cancelled = false
+        if (memory.destroyed) forget(world.id)
       })
   },
 
   async stop(world: World): Promise<void> {
     const memory = memoryOf(world.id)
-    memory.stopping = true
-    docker('POST', `/containers/${containerName(world)}/stop?t=${STOP_SECONDS}`, {
-      timeoutMs: (STOP_SECONDS + 30) * 1000,
-    }).catch((error: unknown) => console.error(`[aboutm.ee] Stoppen von ${world.id}:`, error))
+    if (memory.launching) {
+      memory.cancelled = true
+      return
+    }
+    if (!memory.stopping) sendStop(world, memory)
+  },
+
+  async destroy(world: World): Promise<void> {
+    const memory = memoryOf(world.id)
+    memory.cancelled = true
+    memory.destroyed = true
+    // Sofort beenden und entfernen; ein gerade laufendes Anlegen räumt wegen `cancelled` selbst hinter sich auf.
+    await removeContainer(containerName(world))
+    if (!memory.launching) forget(world.id)
   },
 
   async state(world: World): Promise<RuntimeState> {
     const memory = memoryOf(world.id)
-    if (memory.launching) return 'starting'
+    if (memory.launching) return memory.cancelled ? 'stopping' : 'starting'
 
     const name = containerName(world)
     const response = await docker('GET', `/containers/${name}/json`)
@@ -252,7 +343,7 @@ export const dockerDriver: RuntimeDriver = {
     if (memory.stopping) return 'stopping'
     if (memory.online) return 'online'
 
-    if (inspect.State.Health?.Status === 'healthy' || (await fetchLogs(world, memory)).some((line) => READY.test(line))) {
+    if (await isReady(world, memory)) {
       memory.online = true
       return 'online'
     }
@@ -271,18 +362,18 @@ export const dockerDriver: RuntimeDriver = {
   async players(world: World): Promise<string[]> {
     const memory = memoryOf(world.id)
     const now = Date.now()
-    if (memory.players && now - memory.players.at < 10_000) return memory.players.names
+    if (memory.players && now - memory.players.at < PLAYERS_FRESH_MS) return memory.players.names
     try {
-      const { output } = await exec(containerName(world), ['rcon-cli', 'list'])
-      const match = /players online:(.*)$/m.exec(output)
-      const names = (match?.[1] ?? '')
-        .split(',')
-        .map((name) => name.trim())
-        .filter((name) => /^[A-Za-z0-9_.*-]{1,32}$/.test(name))
+      const { output, exitCode } = await exec(containerName(world), ['rcon-cli', 'list'], 4000)
+      if (exitCode !== 0) throw new Error('rcon-cli antwortet nicht')
+      const names = parsePlayerList(output)
       memory.players = { at: now, names }
       return names
     } catch {
-      return memory.players?.names ?? []
+      // Antwortet der Server nicht, gilt die letzte Liste nur noch kurz weiter. Danach zählt niemand mehr als
+      // online — sonst liefe die Spielzeit weiter und die Welt würde nie von selbst pausieren.
+      if (memory.players && now - memory.players.at < PLAYERS_STALE_MS) return memory.players.names
+      return []
     }
   },
 

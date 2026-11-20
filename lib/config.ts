@@ -27,6 +27,8 @@ export const config = {
 
   maxManualBackups: 5,
   maxAutoBackups: 5,
+  /** Alle Backups einer Welt zusammen dürfen höchstens so viel belegen. */
+  backupGiB: 12,
   /** Textdateien bis zu dieser Größe lassen sich im Browser öffnen. */
   maxEditableBytes: 512 * 1024,
 

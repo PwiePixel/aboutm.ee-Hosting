@@ -1,12 +1,13 @@
 import fs from 'node:fs'
-import path from 'node:path'
 import { config } from './config'
 import { db } from './db'
 import { directorySize } from './files'
 import { newWorldId, randomId } from './ids'
+import { isLocked } from './locks'
 import { backupsDir, worldDir } from './paths'
 import { runtime } from './runtime'
-import type { World, WorldStatus } from './runtime/types'
+import type { RuntimeDriver, RuntimeState, World, WorldStatus } from './runtime/types'
+import { Dir, removeTree, withDir, type Owner } from './safe-fs'
 import { limits } from './settings'
 import { recordConcurrency, recordPlay, recordStart, recordWorldCreated } from './stats'
 import { findVersion, newerVersions } from './versions'
@@ -33,8 +34,12 @@ export function getWorld(userId: string, worldId: string): World | undefined {
   return db().prepare('SELECT * FROM worlds WHERE id = ? AND user_id = ?').get(worldId, userId) as World | undefined
 }
 
+function find(worldId: string): World | undefined {
+  return db().prepare('SELECT * FROM worlds WHERE id = ?').get(worldId) as World | undefined
+}
+
 function reload(world: World): World {
-  return (db().prepare('SELECT * FROM worlds WHERE id = ?').get(world.id) as World | undefined) ?? world
+  return find(world.id) ?? world
 }
 
 export function slotsInUse(): number {
@@ -130,13 +135,12 @@ export function changeVersion(world: World, versionId: string): void {
 }
 
 export async function deleteWorld(world: World): Promise<void> {
-  const current = reload(world)
-  if (ACTIVE.includes(current.status)) {
-    await runtime().stop(current)
-  }
+  // Erst den Server samt Container wegnehmen — sonst würden einem laufenden Server die Dateien
+  // unter den Füßen gelöscht, und der Container bliebe zurück.
+  await runtime().destroy(reload(world))
   db().prepare('DELETE FROM worlds WHERE id = ?').run(world.id)
-  fs.rmSync(worldDir(world.id), { recursive: true, force: true })
-  fs.rmSync(backupsDir(world.id), { recursive: true, force: true })
+  removeTree(worldDir(world.id))
+  removeTree(backupsDir(world.id))
 }
 
 // ───────────────────────── Einstellungen im laufenden Spiel ─────────────────────────
@@ -182,40 +186,88 @@ export async function removeWhitelistPlayer(world: World, player: string): Promi
  * Alles andere in der Datei bleibt, wie es ist.
  */
 export function writeManagedFiles(world: World): void {
-  const dir = worldDir(world.id)
-  fs.mkdirSync(dir, { recursive: true })
+  const root = worldDir(world.id)
+  fs.mkdirSync(root, { recursive: true })
 
   const managed: Record<string, string> = {
     motd: `${world.name.replace(/[\\\n\r]/g, ' ')} · ${config.brand}`,
     'max-players': String(config.maxPlayers),
     gamemode: world.gamemode,
     difficulty: world.difficulty,
-    'level-seed': world.seed,
+    'level-seed': world.seed.replace(/[\n\r]/g, ' '),
     'white-list': world.whitelist_enabled ? 'true' : 'false',
     'enforce-whitelist': world.whitelist_enabled ? 'true' : 'false',
     'server-port': '25565',
     'online-mode': 'true',
   }
 
-  const file = path.join(dir, 'server.properties')
-  const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split(/\r?\n/) : []
-  const seen = new Set<string>()
-  const lines = existing
-    .filter((line, index) => !(index === existing.length - 1 && line === ''))
-    .map((line) => {
-      const key = line.startsWith('#') ? '' : line.split('=')[0]!.trim()
-      if (key in managed) {
-        seen.add(key)
-        return `${key}=${managed[key]}`
-      }
-      return line
-    })
-  for (const [key, value] of Object.entries(managed)) {
-    if (!seen.has(key)) lines.push(`${key}=${value}`)
-  }
-  fs.writeFileSync(file, `${lines.join('\n')}\n`)
+  // Der Weltordner gehört dem Server und ist nicht vertrauenswürdig: gelesen wird nur eine echte
+  // Datei, geschrieben wird immer eine neue Datei an die Stelle — nie durch einen Link hindurch.
+  withDir(root, [], (dir) => {
+    const existing = readManagedText(dir, 'server.properties')?.split(/\r?\n/) ?? []
+    const seen = new Set<string>()
+    const lines = existing
+      .filter((line, index) => !(index === existing.length - 1 && line === ''))
+      .map((line) => {
+        const key = line.startsWith('#') ? '' : line.split('=')[0]!.trim()
+        if (key in managed) {
+          seen.add(key)
+          return `${key}=${managed[key]}`
+        }
+        return line
+      })
+    for (const [key, value] of Object.entries(managed)) {
+      if (!seen.has(key)) lines.push(`${key}=${value}`)
+    }
+    dir.replaceFile('server.properties', `${lines.join('\n')}\n`, SERVER_OWNER)
+    dir.replaceFile('eula.txt', 'eula=true\n', SERVER_OWNER)
 
-  fs.writeFileSync(path.join(dir, 'eula.txt'), 'eula=true\n')
+    if (!runtime().preview) enforceProxyProtocol(dir)
+  })
+}
+
+/** Der Benutzer, unter dem der Minecraft-Server im Container läuft — ihm sollen die Dateien gehören. */
+const SERVER_OWNER: Owner = { uid: config.docker.uid, gid: config.docker.gid }
+
+/** Liest eine Textdatei nur, wenn dort wirklich eine normale, nicht zu große Datei liegt. */
+function readManagedText(dir: Dir, name: string): string | null {
+  if (!dir.lstat(name)?.isFile()) return null
+  try {
+    return dir.readFile(name, config.maxEditableBytes)?.toString('utf8') ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Spieler verbinden sich über den Router. Damit der Server trotzdem ihre echten Adressen sieht
+ * (sonst kämen alle von derselben — mit Drosselung beim gleichzeitigen Beitreten und IP-Sperren, die
+ * alle treffen), spricht der Router das PROXY-Protokoll. Paper muss dafür `proxy-protocol: true` haben.
+ */
+function enforceProxyProtocol(root: Dir): void {
+  const existing = root.lstat('config')
+  if (existing && !existing.isDirectory()) root.remove('config')
+  if (!root.lstat('config')) root.mkdir('config', SERVER_OWNER)
+
+  const dir = root.openDir('config')
+  try {
+    const name = 'paper-global.yml'
+    const current = readManagedText(dir, name)
+    let next: string
+    if (current === null) {
+      // Paper ergänzt beim Start alle übrigen Einstellungen selbst.
+      next = 'proxies:\n  proxy-protocol: true\n'
+    } else if (/^[ \t]+proxy-protocol:.*$/m.test(current)) {
+      next = current.replace(/^([ \t]+)proxy-protocol:.*$/m, '$1proxy-protocol: true')
+    } else if (/^proxies:[ \t]*$/m.test(current)) {
+      next = current.replace(/^proxies:[ \t]*$/m, 'proxies:\n  proxy-protocol: true')
+    } else {
+      next = `${current.replace(/\n*$/, '\n')}proxies:\n  proxy-protocol: true\n`
+    }
+    if (next !== current) dir.replaceFile(name, next, SERVER_OWNER)
+  } finally {
+    dir.close()
+  }
 }
 
 // ───────────────────────── Starten, pausieren, neu starten ─────────────────────────
@@ -229,9 +281,16 @@ function setStatus(world: World, status: WorldStatus, extra: Partial<World> = {}
 }
 
 async function launch(world: World): Promise<void> {
-  writeManagedFiles(world)
-  await runtime().start(world)
+  // Sofort als „startet“ vermerken — ohne Wartepunkt davor. So sieht jede gleichzeitige Anfrage
+  // die Welt und ihren Serverplatz schon als belegt.
   setStatus(world, 'starting', { queued_at: null, restart_pending: 0, pause_reason: null })
+  try {
+    writeManagedFiles(world)
+    await runtime().start(world)
+  } catch (error) {
+    setStatus(world, 'paused', { pause_reason: 'error' })
+    throw error
+  }
 }
 
 export type StartResult = 'starting' | 'queued'
@@ -239,6 +298,9 @@ export type StartResult = 'starting' | 'queued'
 export async function requestStart(world: World): Promise<StartResult> {
   const current = reload(world)
   if (current.status !== 'paused') throw new WorldError('Diese Welt läuft schon oder wartet auf einen Platz.')
+  if (isLocked(current.id)) {
+    throw new WorldError('Deine Welt wird gerade gesichert oder wiederhergestellt. Versuch es gleich noch einmal.')
+  }
 
   const busy = db()
     .prepare(
@@ -271,16 +333,19 @@ export async function requestStop(world: World, reason: 'user' | 'idle' | 'admin
     return
   }
   if (current.status === 'starting' || current.status === 'online') {
-    await runtime().stop(current)
     setStatus(current, 'stopping', { restart_pending: 0, pause_reason: reason })
+    await runtime().stop(current)
+  } else if (current.status === 'stopping') {
+    // Schon unterwegs — den Stopp noch einmal anstoßen schadet nicht und hilft, falls er verloren ging.
+    await runtime().stop(current)
   }
 }
 
 export async function requestRestart(world: World): Promise<void> {
   const current = reload(world)
   if (current.status !== 'online') throw new WorldError('Neu starten geht nur, während deine Welt online ist.')
-  await runtime().stop(current)
   setStatus(current, 'stopping', { restart_pending: 1, pause_reason: null })
+  await runtime().stop(current)
 }
 
 export async function sendCommand(world: World, command: string): Promise<void> {
@@ -290,12 +355,14 @@ export async function sendCommand(world: World, command: string): Promise<void> 
 }
 
 const IPV4 = /\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b/g
+// IPv6 steht im Log hinter einem Schrägstrich, z. B. [/[2001:db8::1]:54321] — Uhrzeiten bleiben so unberührt.
+const IPV6 = /\/\[?(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F.]{0,15}\]?(?::\d{1,5})?/g
 
 /** Log für die Webkonsole — IP-Adressen der Mitspieler werden ausgeblendet. */
 export async function consoleLines(world: World): Promise<string[]> {
   if (!ACTIVE.includes(world.status)) return []
   const lines = await runtime().logs(world)
-  return lines.map((line) => line.replace(IPV4, '•••'))
+  return lines.map((line) => line.replace(IPV6, '/•••').replace(IPV4, '•••'))
 }
 
 // ───────────────────────── Taktgeber ─────────────────────────
@@ -333,14 +400,26 @@ export async function tick(hooks: Hooks = {}, now = Date.now()): Promise<void> {
     const active = db()
       .prepare(`SELECT * FROM worlds WHERE status IN ('starting', 'online', 'stopping')`)
       .all() as World[]
-    let playersOnline = 0
-    let serversOnline = 0
     const autoPauseMs = limits().autoPauseMinutes * 60_000
 
-    for (const world of active) {
-      try {
-        const actual = await driver.state(world)
+    // Alle Server gleichzeitig befragen — ein einzelner, der nicht antwortet, hält die anderen nicht auf.
+    const observed = await Promise.all(active.map((world) => observe(driver, world)))
 
+    // Jeder Spieler zählt nur einmal, auch wenn er (durch den Zwischenspeicher) kurz in zwei Welten auftaucht.
+    const playersOnline = new Set<string>()
+    let serversOnline = 0
+
+    for (const observation of observed) {
+      if (!observation) continue
+      const { actual } = observation
+      // Hat sich die Welt geändert, während der Server befragt wurde (z. B. durch einen Klick auf
+      // „Pausieren“), ist die Beobachtung überholt — die nächste Runde sieht den neuen Stand.
+      const world = find(observation.world.id)
+      if (!world || world.status !== observation.world.status || world.status_since !== observation.world.status_since) {
+        continue
+      }
+
+      try {
         if (world.status === 'starting') {
           if (actual === 'online') {
             setStatus(world, 'online', { started_at: now, last_active_at: now })
@@ -348,19 +427,20 @@ export async function tick(hooks: Hooks = {}, now = Date.now()): Promise<void> {
           } else if (actual === 'stopped') {
             setStatus(world, 'paused', { pause_reason: 'error' })
           }
-          continue
-        }
-
-        if (world.status === 'online') {
+        } else if (world.status === 'online') {
           if (actual === 'stopping') {
             setStatus(world, 'stopping', { pause_reason: world.pause_reason ?? 'user' })
           } else if (actual === 'stopped') {
             setStatus(world, 'paused', { pause_reason: world.pause_reason ?? 'stopped' })
-            await hooks.afterPause?.(world)
+            runAfterPause(hooks, world)
           } else {
-            const players = await driver.players(world)
-            playersOnline += players.length
             serversOnline += 1
+            const players = observation.players.filter((name) => {
+              const key = name.toLowerCase()
+              if (playersOnline.has(key)) return false
+              playersOnline.add(key)
+              return true
+            })
             if (diskCheckDue(world.id, now) && directorySize(worldDir(world.id)) > DISK_QUOTA_BYTES) {
               await requestStop(world, 'disk')
             } else if (players.length > 0) {
@@ -370,22 +450,24 @@ export async function tick(hooks: Hooks = {}, now = Date.now()): Promise<void> {
               await requestStop(world, 'idle')
             }
           }
-          continue
-        }
-
-        if (world.status === 'stopping' && actual === 'stopped') {
-          if (world.restart_pending) {
-            await launch(world)
-          } else {
-            setStatus(world, 'paused')
-            await hooks.afterPause?.(world)
+        } else if (world.status === 'stopping') {
+          if (actual === 'stopped') {
+            if (world.restart_pending) {
+              await launch(world)
+            } else {
+              setStatus(world, 'paused')
+              runAfterPause(hooks, world)
+            }
+          } else if (actual !== 'stopping') {
+            // Der Stopp ist nicht angekommen (etwa weil die Website zwischendurch neu gestartet wurde).
+            await driver.stop(world)
           }
         }
       } catch (error) {
         console.error(`[aboutm.ee] Welt ${world.id}:`, error)
       }
     }
-    recordConcurrency(playersOnline, serversOnline, now)
+    recordConcurrency(playersOnline.size, serversOnline, now)
 
     const free = slotsFree()
     if (free > 0) {
@@ -393,15 +475,35 @@ export async function tick(hooks: Hooks = {}, now = Date.now()): Promise<void> {
         .prepare(`SELECT * FROM worlds WHERE status = 'queued' ORDER BY queued_at LIMIT ?`)
         .all(free) as World[]
       for (const world of queued) {
+        if (isLocked(world.id)) continue
         try {
           await launch(world)
         } catch (error) {
           console.error(`[aboutm.ee] Start von ${world.id} fehlgeschlagen:`, error)
-          setStatus(world, 'paused', { queued_at: null, pause_reason: 'error' })
         }
       }
     }
   } finally {
     state.running = false
   }
+}
+
+type Observation = { world: World; actual: RuntimeState; players: string[] }
+
+async function observe(driver: RuntimeDriver, world: World): Promise<Observation | null> {
+  try {
+    const actual = await driver.state(world)
+    const players = world.status === 'online' && actual === 'online' ? await driver.players(world) : []
+    return { world, actual, players }
+  } catch (error) {
+    console.error(`[aboutm.ee] Welt ${world.id}:`, error)
+    return null
+  }
+}
+
+/** Nacharbeit nach dem Pausieren (z. B. das automatische Backup) läuft nebenher und hält den Takt nicht auf. */
+function runAfterPause(hooks: Hooks, world: World): void {
+  Promise.resolve()
+    .then(() => hooks.afterPause?.(world))
+    .catch((error: unknown) => console.error(`[aboutm.ee] Nacharbeit für ${world.id}:`, error))
 }

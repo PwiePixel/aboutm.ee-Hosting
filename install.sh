@@ -13,7 +13,8 @@
 # Ohne Rückfragen (z. B. für Automatisierung) über Umgebungsvariablen:
 #   AM_SITE_DOMAIN, AM_SERVER_DOMAIN, AM_NODE_HOST, AM_ADMIN_EMAIL, AM_ADMIN_PASSWORD,
 #   AM_CF_API_TOKEN  oder  AM_TURNSTILE_SITE_KEY + AM_TURNSTILE_SECRET_KEY,
-#   AM_PUBLIC_IP, AM_DATA_PATH, AM_PORT_MIN, AM_PORT_MAX, AM_CADDY_TLS, AM_ORIGIN_ALLOW, AM_YES=1
+#   AM_PUBLIC_IP, AM_DATA_PATH, AM_PORT_MIN, AM_PORT_MAX, AM_CADDY_TLS, AM_ORIGIN_ALLOW,
+#   AM_SITE_PROXIED=true|false, AM_YES=1
 
 set -Eeuo pipefail
 
@@ -190,14 +191,40 @@ cf_find_zone() { # cf_find_zone <Adresse>  → setzt ZONE_ID, ZONE_NAME, ACCOUNT
 }
 
 # Prüft ohne Abbruch, ob das Token die Domain zu einer Adresse lesen darf.
+# Rückgabe: 0 = ja · 1 = Cloudflare hat geantwortet, aber das Token darf es nicht · 2 = Cloudflare nicht erreichbar
 cf_zone_visible() { # cf_zone_visible <Adresse>
-  local candidate="$1" response
+  local candidate="$1" body code
   while [[ "$candidate" == *.* ]]; do
-    response="$(cf_try GET "/zones?name=$candidate")" || return 1
-    if [[ "$(jq -r '.result | length' <<<"$response")" -gt 0 ]]; then return 0; fi
+    body="$(curl --silent --max-time 30 --header "@$CF_HEADERS" --write-out '\n%{http_code}' "$CF_API/zones?name=$candidate")" || return 2
+    code="${body##*$'\n'}"
+    body="${body%$'\n'*}"
+    case "$code" in
+    200) ;;
+    400 | 401 | 403) return 1 ;;
+    *) return 2 ;;
+    esac
+    [[ "$(jq -r '.success // false' <<<"$body" 2>/dev/null)" == true ]] || return 2
+    if [[ "$(jq -r '.result | length' <<<"$body")" -gt 0 ]]; then return 0; fi
     candidate="${candidate#*.}"
   done
   return 1
+}
+
+# Stellt ohne API fest, ob die Website über den Cloudflare-Proxy läuft: gibt true, false oder nichts aus.
+detect_site_proxied() {
+  if [[ -n "${AM_SITE_PROXIED:-}" ]]; then
+    printf '%s' "$AM_SITE_PROXIED"
+    return
+  fi
+  # Zeigt die Adresse direkt auf diesen Server, ist kein Proxy davor.
+  if getent ahostsv4 "$SITE_DOMAIN" 2>/dev/null | awk '{print $1}' | grep -qxF "$PUBLIC_IP"; then
+    printf 'false'
+    return
+  fi
+  # Diese Seite beantwortet Cloudflare selbst — nur wenn die Adresse über seinen Proxy läuft.
+  if curl -fsS --max-time 10 "https://$SITE_DOMAIN/cdn-cgi/trace" 2>/dev/null | grep -qxF "h=$SITE_DOMAIN"; then
+    printf 'true'
+  fi
 }
 
 # Legt einen DNS-Eintrag an oder aktualisiert ihn. Fragt nach, bevor ein fremder Eintrag ersetzt wird.
@@ -496,18 +523,41 @@ main() {
     # Erneuter Lauf mit dem gespeicherten Token: Es kann bewusst knapper gehalten sein (nur DNS bearbeiten) oder
     # inzwischen ersetzt worden sein. Hat sich an den Adressen nichts geändert, ist dann nichts einzurichten —
     # die Aktualisierung soll daran nicht scheitern.
+    local unchanged=0 visible=0
     if ((token_stored)) && [[ -n "$stored_zone" && -n "$TURNSTILE_SITE_KEY" && -n "$TURNSTILE_SECRET_KEY" &&
       "$(env_value "$env_file" SITE_DOMAIN)" == "$SITE_DOMAIN" && "$stored_server" == "$SERVER_DOMAIN" &&
-      "$(env_value "$env_file" NODE_HOST)" == "$NODE_HOST" ]] && ! { cf_zone_visible "$SITE_DOMAIN" && cf_zone_visible "$SERVER_DOMAIN"; }; then
+      "$(env_value "$env_file" NODE_HOST)" == "$NODE_HOST" ]]; then
+      unchanged=1
+      cf_zone_visible "$SITE_DOMAIN" || visible=$?
+      if ((visible == 0)); then cf_zone_visible "$SERVER_DOMAIN" || visible=$?; fi
+    fi
+    if ((unchanged && visible != 0)); then
       step "Cloudflare"
-      warn "Das gespeicherte API-Token darf die Domain nicht (mehr) lesen — die Cloudflare-Einrichtung wird übersprungen."
+      if ((visible == 1)); then
+        warn "Das gespeicherte API-Token darf die Domain nicht (mehr) lesen — die Cloudflare-Einrichtung wird übersprungen."
+        note "Um sie neu einzurichten: AM_CF_API_TOKEN=<Token mit allen Rechten> sudo -E ./install.sh"
+      else
+        warn "Cloudflare ist gerade nicht erreichbar — die Cloudflare-Einrichtung wird übersprungen."
+        note "Hat sich etwas geändert (z. B. die IP-Adresse des Servers), das Skript später noch einmal starten."
+      fi
       note "DNS-Einträge, Turnstile und die übrigen Einstellungen bleiben, wie sie sind."
-      note "Um sie neu einzurichten: AM_CF_API_TOKEN=<Token mit allen Rechten> sudo -E ./install.sh"
       CLOUDFLARE_ZONE_ID="$stored_zone"
-      # Ob die Website über den Proxy läuft, lässt sich so nicht prüfen — die bisherige Einstellung bleibt.
-      SITE_PROXIED=''
+      SITE_PROXIED="$(detect_site_proxied)"
     else
       cloudflare_setup
+      # Wurde für diesen Lauf ein anderes Token mitgegeben als das gespeicherte, und reicht das gespeicherte
+      # (engere) für die Arbeit der Website weiter aus, bleibt es in der .env.
+      local stored_token
+      stored_token="$(env_value "$env_file" CLOUDFLARE_API_TOKEN)"
+      if [[ -n "$stored_token" && "$stored_token" != "$cf_token" ]]; then
+        (umask 077 && printf 'Authorization: Bearer %s\n' "$stored_token" >"$CF_HEADERS")
+        if cf_try GET "/zones/$CLOUDFLARE_ZONE_ID/dns_records?per_page=1" >/dev/null; then
+          cf_token="$stored_token"
+          note "Das bisher gespeicherte Token bleibt in der .env — das mitgegebene wurde nur für diesen Lauf benutzt."
+        else
+          note "Das mitgegebene Token ersetzt das bisher gespeicherte in der .env (das alte funktioniert für diese Domain nicht mehr)."
+        fi
+      fi
     fi
   else
     step "Cloudflare von Hand"
@@ -521,6 +571,7 @@ main() {
     warn "  $SITE_DOMAIN  →  A  $PUBLIC_IP  (mit Cloudflare-Proxy, orange Wolke)"
     warn "  $NODE_HOST  →  A  $PUBLIC_IP  (nur DNS, graue Wolke)"
     warn "Welten haben dann keine eigene Adresse; Spieler verbinden sich über $NODE_HOST:<Port>."
+    SITE_PROXIED="$(detect_site_proxied)"
   fi
 
   # ── 6. Einstellungen schreiben ──
@@ -548,7 +599,12 @@ main() {
   case "$SITE_PROXIED" in
   true) origin_allow="$cf_ranges" ;;
   false) origin_allow='' ;;
-  *) origin_allow="$(env_value "$env_file" ORIGIN_ALLOW)" ;;
+  *)
+    # Nicht feststellbar: die bisherige Einstellung bleibt. Stammt sie von diesem Skript (dieselbe Liste wie
+    # CLOUDFLARE_IPS), wird sie aufgefrischt — eine von Hand gepflegte bleibt unangetastet.
+    origin_allow="$(env_value "$env_file" ORIGIN_ALLOW)"
+    if [[ -n "$origin_allow" && "$origin_allow" == "$(env_value "$env_file" CLOUDFLARE_IPS)" ]]; then origin_allow="$cf_ranges"; fi
+    ;;
   esac
   [[ -z "${AM_ORIGIN_ALLOW+x}" ]] || origin_allow="$AM_ORIGIN_ALLOW"
   (
@@ -644,8 +700,14 @@ EOF
   step "Website öffentlich schalten"
   docker compose up -d --remove-orphans
   ok "Caddy gestartet"
-  if [[ -n "$origin_allow" ]]; then
+  if [[ -n "$origin_allow" && "$origin_allow" == "$cf_ranges" ]]; then
     note "Die Website nimmt nur Anfragen an, die über Cloudflare kommen — ein direkter Aufruf über die IP-Adresse bleibt ohne Antwort."
+  elif [[ -n "$origin_allow" ]]; then
+    note "Die Website nimmt nur Anfragen aus den Adressbereichen an, die in ORIGIN_ALLOW stehen."
+  elif [[ "$SITE_PROXIED" != false ]]; then
+    warn "Der Server nimmt auch Anfragen an, die nicht über Cloudflare kommen (ORIGIN_ALLOW ist leer) — es ließ sich nicht"
+    warn "feststellen, ob die Website schon über den Cloudflare-Proxy läuft. Sobald der DNS-Eintrag mit oranger Wolke steht,"
+    warn "das Skript noch einmal starten: Dann wird der direkte Zugriff gesperrt."
   fi
   # Von außen nachsehen, ob die Seite wirklich ankommt — und bei den üblichen Stolpersteinen sagen, woran es liegt.
   local code='' tries=0

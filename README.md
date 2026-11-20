@@ -61,7 +61,8 @@ Es muss ein persönliches Token sein — mit einem Konto-Token lässt Cloudflare
 einen DNS-Eintrag anlegt. Beschränke es auf diese eine Domain. Wer mag, trägt nach der Installation ein zweites,
 engeres Token ein, das nur *Zone · DNS · Bearbeiten* darf. Beim Aktualisieren überspringt das Skript dann den
 Cloudflare-Teil (es ist ja schon alles eingerichtet). Willst du später Adressen ändern, gib ihm einmalig wieder ein
-Token mit allen Rechten mit: `AM_CF_API_TOKEN=<Token> sudo -E ./install.sh`.
+Token mit allen Rechten mit: `AM_CF_API_TOKEN=<Token> sudo -E ./install.sh`. Das engere Token bleibt dabei in der
+`.env`, solange es für die Domain weiter funktioniert; das mitgegebene wird nur für diesen Lauf benutzt.
 
 Ohne API-Token geht es auch: Dann fragt das Skript nach den Turnstile-Schlüsseln, du trägst die DNS-Einträge selbst
 ein, und Spieler verbinden sich über `<Server-Adresse>:<Port>` statt über einen eigenen Namen je Welt.
@@ -112,12 +113,17 @@ deinem Server erzeugt Caddy selbst ein Zertifikat (`CADDY_TLS=internal`). Das pa
 betreiben, setze in der `.env` `CADDY_TLS=<deine E-Mail>` — dann holt Caddy ein Zertifikat von Let's Encrypt.
 Wer die Seite über `http://` aufruft, wird auf `https://` umgeleitet.
 
-Solange die Website über den Cloudflare-Proxy läuft (orange Wolke), nimmt Caddy **nur Anfragen von Cloudflare** an:
+Läuft die Website über den Cloudflare-Proxy (orange Wolke), nimmt Caddy **nur Anfragen von Cloudflare** an:
 Die IP-Adresse deines Servers ist über die Minecraft-Adresse bekannt, und ohne diese Sperre ließe sich Cloudflares
 Schutz umgehen, indem man die Website direkt über die IP anspricht. Das Skript trägt dafür Cloudflares
-Adressbereiche in die `.env` ein (`ORIGIN_ALLOW`, `CLOUDFLARE_IPS`) und frischt sie bei jedem Lauf auf. Schaltest du
-den Proxy für die Website im Cloudflare-Dashboard aus, lass das Skript noch einmal laufen (oder leere
-`ORIGIN_ALLOW` und starte Caddy neu) — sonst bekommt niemand mehr eine Antwort.
+Adressbereiche in die `.env` ein (`ORIGIN_ALLOW`, `CLOUDFLARE_IPS`) und frischt sie bei jedem Lauf auf — sobald es
+sehen kann, dass die Website über den Proxy läuft. Bei einer Installation ohne API-Token ist das beim ersten Lauf
+noch nicht der Fall (den DNS-Eintrag legst du ja erst an): Starte das Skript danach noch einmal, es meldet am Ende,
+ob die Sperre aktiv ist.
+
+Schaltest du den Proxy für die Website später aus, muss die Sperre wieder weg — sonst bekommt niemand mehr eine
+Antwort: `AM_ORIGIN_ALLOW= sudo -E ./install.sh`, oder `ORIGIN_ALLOW` in der `.env` leeren und `docker compose up -d`
+(ein bloßes `restart` übernimmt die Änderung nicht).
 
 ### Vor dem Start erledigen
 
@@ -166,7 +172,8 @@ Es gibt zwei Ebenen:
 2. **Vor der ganzen Seite**: das stellst du im Cloudflare-Dashboard ein, nicht im Code. Unter **Security → WAF →
    Custom rules** eine Regel mit der Aktion *Managed Challenge* anlegen (z. B. für `/login`, `/register` und `/app`),
    oder bei einem Angriff vorübergehend den *Under Attack Mode* einschalten. Das greift für alles, was über
-   Cloudflare kommt — und anders kommt man an die Website nicht heran (siehe HTTPS).
+   Cloudflare kommt. Damit sich das nicht über die IP-Adresse des Servers umgehen lässt, muss die Sperre für
+   direkte Anfragen aktiv sein (siehe HTTPS).
 
 ## Betrieb
 

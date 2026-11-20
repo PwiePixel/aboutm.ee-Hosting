@@ -46,7 +46,11 @@ http://{$SITE_DOMAIN} {
 	# Netz, und die Anmeldung klappte ohnehin nicht (das Sitzungs-Cookie gilt nur über HTTPS).
 	# Im Modus „Flexible“ kommt die Anfrage von Cloudflare zwar unverschlüsselt hier an, der Besucher war
 	# aber über HTTPS da; das meldet Cloudflare mit X-Forwarded-Proto: https, und es wird nicht umgeleitet.
-	@plain not header X-Forwarded-Proto https
+	# Umgeleitet wird nur, wer den Server überhaupt ansprechen darf — alle anderen bekommen auch hier keine Antwort.
+	@plain {
+		remote_ip {$ORIGIN_ALLOW:0.0.0.0/0 ::/0}
+		not header X-Forwarded-Proto https
+	}
 	redir @plain https://{host}{uri} 308
 	import website
 }

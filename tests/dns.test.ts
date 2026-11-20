@@ -225,6 +225,75 @@ describe('Adresse einer Welt', () => {
     expect(srv()).toHaveLength(0)
   })
 
+  it('löscht keinen Eintrag einer bestehenden Welt, wenn ein Domainwechsel zurückgenommen wird', async () => {
+    const { config } = await import('@/lib/config')
+    const mutable = config as { serverDomain: string }
+    const world = worlds.createWorld(newUser(), INPUT)
+    await dns.ensureWorldRecord(world)
+    await dns.dnsMaintenance()
+    const name = dns.recordName(world)
+
+    // Domain geändert, während Cloudflare nicht antwortet: die alten Namen bleiben vorgemerkt.
+    mutable.serverDomain = 'welten.example.com'
+    cloudflare.state.failDns = true
+    try {
+      await dns.dnsMaintenance()
+      expect(pending()).toEqual([{ name, record_id: expect.any(String), port: world.port }])
+    } finally {
+      mutable.serverDomain = 'example.com'
+      cloudflare.state.failDns = false
+    }
+    // Zurückgestellt: der Eintrag der Welt gilt wieder und darf nicht mehr gelöscht werden.
+    await dns.dnsMaintenance()
+    await dns.dnsMaintenance()
+    expect(srv().map((record) => record.name)).toEqual([name])
+    expect(fresh(world).dns_record_id).toBe(srv()[0]!.id)
+    expect(pending()).toEqual([])
+    await deleteAll()
+  })
+
+  it('hält nach einem Domainwechsel den Port einer gelöschten Welt gesperrt, bis auch ihr alter Name weg ist', async () => {
+    const { config } = await import('@/lib/config')
+    const mutable = config as { serverDomain: string }
+    const world = worlds.createWorld(newUser(), INPUT)
+    await dns.ensureWorldRecord(world)
+    await dns.dnsMaintenance()
+    const oldName = dns.recordName(world)
+    mutable.serverDomain = 'welten.example.com'
+    try {
+      dns.reconcileDnsConfig() // der alte Name ist vorgemerkt, aber noch nicht entfernt
+      await worlds.deleteWorld(fresh(world))
+      expireHolds() // die Sperrfrist des neuen Namens ist um — der alte Eintrag besteht aber noch
+      expect(srv().map((record) => record.name)).toContain(oldName)
+      expect(worlds.createWorld(newUser(), INPUT).port).not.toBe(world.port)
+      await dns.dnsMaintenance()
+      expect(srv().map((record) => record.name)).not.toContain(oldName)
+    } finally {
+      mutable.serverDomain = 'example.com'
+    }
+    await dns.dnsMaintenance()
+    await deleteAll()
+    expect(srv()).toHaveLength(0)
+  })
+
+  it('lässt eine Welt nicht im Zwischenzustand hängen, wenn beim Start kein Port frei ist', async () => {
+    const user = newUser()
+    const { setLimit } = await import('@/lib/settings')
+    setLimit('maxWorldsPerUser', 20)
+    const all = Array.from({ length: 5 }, () => worlds.createWorld(user, INPUT)) // der Bereich ist damit voll
+    database.db().prepare('UPDATE worlds SET port = NULL WHERE id = ?').run(all[0]!.id)
+    const extra = worlds.createWorld(newUser(), INPUT) // nimmt den frei gewordenen Port
+    expect(extra.port).toBe(all[0]!.port)
+    await expect(worlds.requestStart(fresh(all[0]!))).rejects.toThrow(/Adressen vergeben/)
+    expect(fresh(all[0]!)).toMatchObject({ status: 'paused', port: null })
+    // Auch die Übernahme alter Welten startet nur neu, wer einen Port bekommen hat.
+    database.db().prepare(`UPDATE worlds SET status = 'online' WHERE id = ?`).run(all[0]!.id)
+    worlds.adoptLegacyWorlds()
+    expect(fresh(all[0]!)).toMatchObject({ status: 'online', port: null })
+    database.db().prepare(`UPDATE worlds SET status = 'paused' WHERE id = ?`).run(all[0]!.id)
+    await deleteAll()
+  })
+
   it('löscht beim Entfernen eines Kontos auch eine Welt, die währenddessen noch angelegt wurde', async () => {
     const user = newUser()
     const first = worlds.createWorld(user, INPUT)

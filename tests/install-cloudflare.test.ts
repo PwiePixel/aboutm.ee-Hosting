@@ -211,7 +211,7 @@ describe('install.sh — Cloudflare einrichten', () => {
       new Promise<number>((resolve) => {
         const child = spawn(
           'bash',
-          ['-c', `AM_SOURCE_ONLY=1 source ./install.sh; WORK_DIR="$(mktemp -d)"; CF_HEADERS="$WORK_DIR/h"; printf 'Authorization: Bearer %s\\n' "$T" > "$CF_HEADERS"; cf_zone_visible "$D"`],
+          ['-c', `AM_SOURCE_ONLY=1 source ./install.sh; WORK_DIR="$(mktemp -d)"; CF_HEADERS="$WORK_DIR/h"; printf 'Authorization: Bearer %s\\n' "$T" > "$CF_HEADERS"; cf_zone_visible "$D" || exit $?`],
           { cwd: ROOT, env: { ...process.env, AM_CF_API_BASE: mock.url, T: token, D: domain }, stdio: 'ignore' },
         )
         child.on('close', (code) => resolve(code ?? 1))
@@ -219,6 +219,27 @@ describe('install.sh — Cloudflare einrichten', () => {
     expect(await check('test-token', 'hosting.example.com')).toBe(0)
     expect(await check('test-token', 'hosting.andere-domain.de')).toBe(1)
     expect(await check('falsches-token', 'hosting.example.com')).toBe(1)
+    // Ist Cloudflare gar nicht erreichbar, ist das etwas anderes als „kein Zugriff“.
+    await mock.close()
+    expect(await check('test-token', 'hosting.example.com')).toBe(2)
+    mock = await startCloudflareMock({ zones: ['example.com'] })
+  })
+
+  it('erkennt ohne API, ob die Website über den Cloudflare-Proxy läuft — oder lässt es offen', async () => {
+    const detect = (vars: Record<string, string>) =>
+      new Promise<string>((resolve) => {
+        let out = ''
+        const child = spawn('bash', ['-c', 'AM_SOURCE_ONLY=1 source ./install.sh; detect_site_proxied'], {
+          cwd: ROOT,
+          env: { ...process.env, SITE_DOMAIN: 'gibt-es-nicht.invalid', PUBLIC_IP: '203.0.113.7', ...vars },
+          stdio: ['ignore', 'pipe', 'ignore'],
+        })
+        child.stdout.on('data', (chunk: Buffer) => (out += chunk.toString()))
+        child.on('close', () => resolve(out))
+      })
+    expect(await detect({})).toBe('') // nicht feststellbar
+    expect(await detect({ SITE_DOMAIN: 'localhost', PUBLIC_IP: '127.0.0.1' })).toBe('false') // zeigt direkt auf diesen Server
+    expect(await detect({ AM_SITE_PROXIED: 'true' })).toBe('true')
   })
 
   it('holt die aktuellen Adressbereiche von Cloudflare und fällt sonst auf die mitgelieferten zurück', async () => {

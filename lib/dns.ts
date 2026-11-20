@@ -135,12 +135,27 @@ export function queueRecordRemoval(world: Removable): string | null {
   return name
 }
 
+/** Ist das der aktuelle Name einer bestehenden Welt? */
+function ownedByLiveWorld(name: string): boolean {
+  const prefix = '_minecraft._tcp.'
+  const suffix = `.${config.serverDomain}`
+  if (!name.startsWith(prefix) || !name.endsWith(suffix)) return false
+  const label = name.slice(prefix.length, name.length - suffix.length)
+  return db().prepare('SELECT 1 FROM worlds WHERE host_label = ?').get(label) !== undefined
+}
+
 /** Entfernt einen vorgemerkten Eintrag bei Cloudflare. Wirft, wenn das gerade nicht klappt — die Vormerkung bleibt. */
 async function removeQueued(name: string): Promise<void> {
   const row = db().prepare('SELECT record_id FROM dns_cleanup WHERE name = ? AND removed_at IS NULL').get(name) as
     | { record_id: string | null }
     | undefined
   if (!row) return
+  // Niemals den Eintrag einer Welt löschen, die es gibt: Gehört der Name (wieder) einer bestehenden Welt —
+  // etwa nach einem zurückgenommenen Domainwechsel —, ist die Vormerkung überholt.
+  if (ownedByLiveWorld(name)) {
+    db().prepare('DELETE FROM dns_cleanup WHERE name = ?').run(name)
+    return
+  }
   if (row.record_id) await cloudflare('DELETE', `/dns_records/${encodeURIComponent(row.record_id)}`)
   // Zusätzlich nach dem Namen suchen: Ein Eintrag kann bei Cloudflare angelegt worden sein, ohne dass seine
   // Kennung noch in der Datenbank ankam.
@@ -233,19 +248,21 @@ export function reconcileDnsConfig(): void {
 
   db().transaction(() => {
     if (previous) {
-      const affected = db().prepare('SELECT host_label, dns_record_id FROM worlds WHERE dns_record_id IS NOT NULL').all() as Array<{
+      const affected = db().prepare('SELECT host_label, dns_record_id, port FROM worlds WHERE dns_record_id IS NOT NULL').all() as Array<{
         host_label: string
         dns_record_id: string
+        port: number | null
       }>
       const renamed = previous.serverDomain !== current.serverDomain
       const sameZone = previous.zoneId === current.zoneId
       if (renamed && sameZone) {
-        // Die alten Namen gibt es noch — entfernen. Der Port bleibt bei der Welt und wird nicht gesperrt.
+        // Die alten Namen gibt es noch — entfernen. Der Port steht mit dabei: Solange die Welt besteht, ändert
+        // das nichts (er ist ohnehin belegt); wird sie gelöscht, bevor ihr alter Name weg ist, bleibt er gesperrt.
         const queue = db().prepare(
-          'INSERT OR REPLACE INTO dns_cleanup (name, record_id, port, created_at, removed_at) VALUES (?, ?, NULL, ?, NULL)',
+          'INSERT OR REPLACE INTO dns_cleanup (name, record_id, port, created_at, removed_at) VALUES (?, ?, ?, ?, NULL)',
         )
         for (const world of affected) {
-          queue.run(`_minecraft._tcp.${world.host_label}.${previous.serverDomain}`, world.dns_record_id, Date.now())
+          queue.run(`_minecraft._tcp.${world.host_label}.${previous.serverDomain}`, world.dns_record_id, world.port, Date.now())
         }
       } else if (!sameZone && affected.length > 0) {
         console.warn(
@@ -257,6 +274,12 @@ export function reconcileDnsConfig(): void {
       if (affected.length > 0) {
         console.log(`[aboutm.ee] Adressen der Welten haben sich geändert — ${affected.length} SRV-Einträge werden neu angelegt.`)
       }
+    }
+    // Vormerkungen, die auf den jetzt gültigen Namen einer bestehenden Welt lauten, sind überholt (die Domain
+    // wurde zurückgestellt, bevor sie abgearbeitet waren) — sie würden sonst den Eintrag der Welt löschen.
+    const drop = db().prepare('DELETE FROM dns_cleanup WHERE name = ?')
+    for (const world of db().prepare('SELECT host_label FROM worlds').all() as Array<{ host_label: string }>) {
+      drop.run(`_minecraft._tcp.${world.host_label}.${current.serverDomain}`)
     }
     db()
       .prepare(`INSERT INTO settings (key, value) VALUES ('dnsSignature', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)

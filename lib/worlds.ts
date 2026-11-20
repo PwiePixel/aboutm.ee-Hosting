@@ -52,16 +52,9 @@ function freePort(): number {
 export function adoptLegacyWorlds(): void {
   const legacy = db().prepare('SELECT * FROM worlds WHERE port IS NULL ORDER BY created_at').all() as World[]
   if (legacy.length === 0) return
-  let restarted = 0
-  for (const world of legacy) {
-    if (world.status === 'starting' || world.status === 'online') {
-      // Der Taktgeber stoppt den alten Container und startet die Welt danach mit ihrem Port neu.
-      setStatus(world, 'stopping', { restart_pending: 1, pause_reason: null })
-      restarted += 1
-    }
-  }
-  const assigned = db().transaction(() => {
-    let count = 0
+  // Erst die Ports vergeben; neu gestartet wird nur, wer auch einen bekommen hat.
+  const withPortNow = new Set<string>()
+  db().transaction(() => {
     for (const world of legacy) {
       let port: number
       try {
@@ -71,10 +64,18 @@ export function adoptLegacyWorlds(): void {
         break
       }
       db().prepare('UPDATE worlds SET port = ? WHERE id = ?').run(port, world.id)
-      count += 1
+      withPortNow.add(world.id)
     }
-    return count
   })()
+  const assigned = withPortNow.size
+  let restarted = 0
+  for (const world of legacy) {
+    if (withPortNow.has(world.id) && (world.status === 'starting' || world.status === 'online')) {
+      // Der Taktgeber stoppt den alten Container und startet die Welt danach mit ihrem Port neu.
+      setStatus(world, 'stopping', { restart_pending: 1, pause_reason: null })
+      restarted += 1
+    }
+  }
   console.log(`[aboutm.ee] ${assigned} bestehende Welten haben einen Port bekommen, ${restarted} laufende werden neu gestartet.`)
 }
 
@@ -366,7 +367,14 @@ function setStatus(world: World, status: WorldStatus, extra: Partial<World> = {}
 }
 
 async function launch(original: World): Promise<void> {
-  const world = withPort(original)
+  let world: World
+  try {
+    world = withPort(original)
+  } catch (error) {
+    // Kein Port frei — die Welt bleibt nicht in einem Zwischenzustand hängen.
+    setStatus(original, 'paused', { queued_at: null, restart_pending: 0, pause_reason: 'error' })
+    throw error
+  }
   // Sofort als „startet“ vermerken — ohne Wartepunkt davor. So sieht jede gleichzeitige Anfrage
   // die Welt und ihren Serverplatz schon als belegt.
   setStatus(world, 'starting', { queued_at: null, restart_pending: 0, pause_reason: null })

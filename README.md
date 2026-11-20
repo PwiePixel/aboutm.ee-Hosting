@@ -39,11 +39,13 @@ alles selbst:
 3. setzt die DNS-Einträge: die Website über den Tunnel, `*.<Domain>` für die Minecraft-Adressen direkt auf den Server
 4. erzeugt die Turnstile-Schlüssel für die Sicherheitsprüfung
 5. öffnet Port 25565 in der Firewall (falls `ufw` aktiv ist)
-6. baut und startet alles, lädt die Minecraft-Images vor
+6. baut und startet die Website — zunächst ohne Verbindung nach außen
 7. legt dein Admin-Konto an und zeigt dir einmalig das Passwort
+8. schaltet die Website erst danach öffentlich und lädt die Minecraft-Images vor
 
-Das Skript lässt sich jederzeit erneut starten (auch zum Aktualisieren): Vorhandenes wird wiederverwendet, und
-bestehende DNS-Einträge überschreibt es nie ohne Rückfrage.
+Das Skript lässt sich jederzeit erneut starten (auch zum Aktualisieren): Vorhandenes wird wiederverwendet, eigene
+Zeilen in der `.env` bleiben erhalten, und bestehende DNS-Einträge oder Tunnel-Weiterleitungen überschreibt es nie
+ohne Rückfrage.
 
 **Das API-Token** legst du im Cloudflare-Dashboard an: *Mein Profil → API-Token → Token erstellen →
 Benutzerdefiniertes Token* mit diesen Berechtigungen:
@@ -55,7 +57,9 @@ Benutzerdefiniertes Token* mit diesen Berechtigungen:
 | Zone | DNS | Bearbeiten |
 | Zone | Zone | Lesen |
 
-Das Token wird nur während der Installation benutzt und nirgends gespeichert. Du kannst es danach wieder löschen.
+Es muss ein persönliches Token sein (Mein Profil → API-Token) — mit einem Konto-Token lässt Cloudflare kein
+Turnstile-Widget anlegen. Das Token wird nur während der Installation benutzt und nirgends gespeichert. Du kannst
+es danach wieder löschen.
 
 Ohne API-Token geht es auch: Dann fragt das Skript nach den Turnstile-Schlüsseln und optional nach einem
 Tunnel-Token, und du trägst die DNS-Einträge selbst ein.
@@ -70,7 +74,8 @@ Tunnel-Token, und du trägst die DNS-Einträge selbst ein.
    Website entweder einen Tunnel einrichten (öffentlicher Hostname → `http://web:3000`) oder einen A-Eintrag mit
    Proxy an und SSL/TLS-Modus **Full**.
 2. **Turnstile:** Cloudflare-Dashboard → Turnstile → Widget hinzufügen → Site Key und Secret Key notieren.
-3. `cp .env.example .env` und ausfüllen. `COMPOSE_PROFILES=tunnel` (mit `TUNNEL_TOKEN`) oder `COMPOSE_PROFILES=caddy`.
+3. `cp .env.example .env` und ausfüllen. `COMPOSE_PROFILES=tunnel` (mit `TUNNEL_TOKEN`) oder
+   `COMPOSE_PROFILES=caddy` — bei Caddy zusätzlich `CLIENT_IP_HEADER=x-real-ip`.
 4. `docker compose up -d --build`
 5. Admin-Konto anlegen:
 
@@ -111,6 +116,9 @@ Gezählt wird laufend und automatisch — als Gesamtwert und je Tag:
 | Server gleichzeitig | Höchstwert gleichzeitig laufender Welten |
 | Verschiedene Spieler | jeder Minecraft-Name einmal — gespeichert nur als nicht umkehrbarer Fingerabdruck |
 
+Die Spielerliste meldet der Server der jeweiligen Welt. Gezählt werden nur gültige Minecraft-Namen, jeder einmal und
+höchstens so viele, wie es Spielerplätze gibt.
+
 Zu sehen auf der Startseite, unter `/zahlen`, im Admin-Bereich (mit den letzten 14 Tagen) und je Welt in der
 Übersicht. Die Spielerzahl fragt die Website alle zehn Sekunden bei jedem laufenden Server ab.
 
@@ -134,7 +142,8 @@ Es gibt zwei Ebenen:
 | Stoppen | `docker compose down` (laufende Welten vorher im Admin-Bereich pausieren) |
 
 Alle Daten liegen unter `DATA_PATH` (Standard `/srv/aboutmee/data`): die Datenbank `aboutmee.sqlite`, `worlds/`,
-`backups/` und `bilder/`. **Diesen Ordner solltest du regelmäßig extern sichern.**
+`backups/` und `bilder/`. Je Welt sind bis zu 6 GiB Dateien und zusammen 12 GiB Backups möglich — plane den
+Plattenplatz entsprechend. **Diesen Ordner solltest du regelmäßig extern sichern.**
 
 Wie viele Welten gleichzeitig laufen dürfen, stellst du im Admin-Bereich ein. Als Faustregel: jede laufende Welt
 kann bis zu 2,5 GiB Arbeitsspeicher belegen — bei 16 GB RAM also etwa 5 gleichzeitig, mit Luft für das System.
@@ -146,13 +155,21 @@ Die Liste steht in `lib/versions.ts`. Den aktuellen Paper-Build einer Version ze
 
 ## Sicherheit — gut zu wissen
 
-- Die Website hat Zugriff auf den Docker-Socket und damit volle Kontrolle über den Server. Betreibe auf diesem Server
-  nichts anderes Schützenswertes und halte ihn aktuell.
-- Minecraft-Container laufen ohne Root-Rechte, ohne Zusatzrechte (`cap-drop ALL`) und mit festen Grenzen für RAM, CPU
-  und Prozesse.
+- **Weltordner gelten als fremd.** Wer eine Welt besitzt, kann über Konfigurationsdateien eigenen Code in seinem
+  Minecraft-Container ausführen. Die Website folgt deshalb in Weltordnern grundsätzlich keinen symbolischen Links —
+  weder im Dateimanager noch beim Starten, Sichern, Wiederherstellen oder Löschen (`lib/safe-fs.ts`). Die Tests in
+  `tests/symlink-safety.test.ts` spielen genau diese Angriffe durch.
+- **Minecraft-Container** laufen ohne Root-Rechte, ohne Zusatzrechte (`cap-drop ALL`) und mit festen Grenzen für
+  RAM, CPU und Prozesse. Sie teilen sich aber ein Docker-Netz und haben Internetzugang.
+- **Die Website hat Zugriff auf den Docker-Socket** und damit volle Kontrolle über den Server. Betreibe auf diesem
+  Server nichts anderes Schützenswertes und halte ihn aktuell.
+- **Ohne Turnstile-Schlüssel bleiben Formulare im Live-Betrieb gesperrt** — ein vergessener Schlüssel öffnet die
+  Seite nicht für Bots. (`ALLOW_NO_TURNSTILE=1` hebt das zum Ausprobieren auf.)
+- **Die Adresse des Besuchers** (für Anmelde-Limits) wird nur aus der Kopfzeile gelesen, die Tunnel bzw. Caddy
+  selbst setzen (`CLIENT_IP_HEADER`). Caddy glaubt dabei nur Cloudflares Servern.
 - Passwörter werden mit scrypt gehasht. Sitzungen liegen als Hash in der Datenbank; das Cookie ist `HttpOnly`.
-- Im Datei-Editor lassen sich nur Textdateien im eigenen Weltordner öffnen — kein Upload, kein Download, keine
-  symbolischen Links.
+- Spieler erreichen ihre Welt über den Router, der ihre echte Adresse per PROXY-Protokoll weiterreicht. Die
+  Website stellt das bei jedem Start in `config/paper-global.yml` der Welt sicher.
 
 ## Lokal entwickeln
 

@@ -27,6 +27,13 @@ export type World = {
   port: number | null
   /** Kennung des SRV-Eintrags bei Cloudflare — `null`, solange er (noch) nicht angelegt ist. */
   dns_record_id: string | null
+  /** Paket der Welt — `null` heißt jeweils „wie im Standardpaket“ (siehe lib/plan.ts). */
+  ram_mib: number | null
+  disk_gib: number | null
+  cpus: number | null
+  max_players: number | null
+  backup_gib: number | null
+  auto_pause_minutes: number | null
 }
 
 /** Was der Treiber über den tatsächlichen Prozess weiß. */

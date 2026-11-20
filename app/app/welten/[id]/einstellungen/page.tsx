@@ -9,9 +9,8 @@ import {
   WhitelistEditor,
 } from '@/components/world-settings'
 import { requireUser } from '@/lib/auth'
-import { config } from '@/lib/config'
 import { formatMiBAsGiB } from '@/lib/format'
-import { limits } from '@/lib/settings'
+import { worldPlan } from '@/lib/plan'
 import { newerVersions } from '@/lib/versions'
 import { getWorld, listWhitelist, worldAddress } from '@/lib/worlds'
 
@@ -39,13 +38,15 @@ export default async function SettingsPage({ params }: { params: Promise<{ id: s
     <p className="text-[14px]">Starte die Welt und warte, bis sie online ist. Dann kannst du das hier ändern.</p>
   )
 
+  const plan = worldPlan(world)
   const fixed: Array<[string, string]> = [
     ['Server-Software', `Paper ${world.version} · Build ${world.paper_build}`],
-    ['Arbeitsspeicher', formatMiBAsGiB(config.ramMiB)],
-    ['Speicherplatz', `${config.diskGiB} GiB`],
-    ['Spielerplätze', String(config.maxPlayers)],
+    ['Paket', plan.upgraded ? 'Upgrade' : 'Kostenlos'],
+    ['Arbeitsspeicher', formatMiBAsGiB(plan.ramMiB)],
+    ['Speicherplatz', `${plan.diskGiB} GiB`],
+    ['Spielerplätze', String(plan.maxPlayers)],
     ['Adresse', worldAddress(world)],
-    ['Auto-Pause', `nach ${limits().autoPauseMinutes} min ohne Spieler`],
+    ['Auto-Pause', plan.autoPauseMinutes > 0 ? `nach ${plan.autoPauseMinutes} min ohne Spieler` : 'aus — die Welt bleibt online'],
   ]
 
   return (
@@ -108,7 +109,7 @@ export default async function SettingsPage({ params }: { params: Promise<{ id: s
         )}
       </Section>
 
-      <Section title="Festgelegt" description="Diese Werte sind für alle Welten gleich.">
+      <Section title="Paket" description="Was deiner Welt zur Verfügung steht. Diese Werte legt der Betreiber fest.">
         <dl className="panel divide-y divide-line">
           {fixed.map(([label, value]) => (
             <div key={label} className="flex justify-between gap-6 px-4 py-3 text-[14px]">

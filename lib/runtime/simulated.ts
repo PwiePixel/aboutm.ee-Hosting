@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { config } from '../config'
 import { worldDir } from '../paths'
+import { worldPlan } from '../plan'
 import type { RuntimeDriver, RuntimeState, RuntimeStats, World } from './types'
 
 /**
@@ -175,7 +176,7 @@ export const simulatedDriver: RuntimeDriver = {
     const starting = instance.phase === 'starting'
     return {
       cpuPercent: Math.round(starting ? 55 + wobble * 30 : 3 + wobble * 6),
-      ramMiB: Math.round(Math.min(config.ramMiB * 0.55, 420 + age * 18) + wobble * 40),
+      ramMiB: Math.round(Math.min(worldPlan(world).ramMiB * 0.55, 420 + age * 18) + wobble * 40),
     }
   },
 
@@ -197,7 +198,7 @@ export const simulatedDriver: RuntimeDriver = {
       case 'list':
         reply(
           instance,
-          `There are ${instance.players.length} of a max of ${config.maxPlayers} players online: ${instance.players.join(', ')}`,
+          `There are ${instance.players.length} of a max of ${worldPlan(world).maxPlayers} players online: ${instance.players.join(', ')}`,
         )
         break
       // Nur im Vorschau-Modus: so tun, als käme oder ginge ein Spieler — zum Ausprobieren von Statistik und Auto-Pause.

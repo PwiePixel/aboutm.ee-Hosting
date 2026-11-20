@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { config } from '../config'
 import { db } from '../db'
+import { heapMiB, hostCapacity, worldPlan } from '../plan'
 import { findVersion } from '../versions'
 import { cleanOutput, demux, docker, exec, expectOk, json } from './docker-api'
 import { removeTree, withDir } from '../safe-fs'
@@ -60,7 +61,7 @@ function forget(worldId: string): void {
  * Die Ausgabe stammt vom Server des Nutzers und ist damit nicht vertrauenswürdig: nur gültige
  * Minecraft-Namen, jeder einmal, und nie mehr als es Spielerplätze gibt.
  */
-export function parsePlayerList(output: string): string[] {
+export function parsePlayerList(output: string, maxPlayers: number = config.maxPlayers): string[] {
   const match = /players online:(.*)$/m.exec(output)
   const names = new Map<string, string>()
   for (const raw of (match?.[1] ?? '').split(',')) {
@@ -69,7 +70,7 @@ export function parsePlayerList(output: string): string[] {
     // Bedrock-Spieler über Geyser/Floodgate tragen ein Präfix wie „.“ oder „*“.
     if (!/^[.*]?[A-Za-z0-9_]{2,16}$/.test(name)) continue
     if (!names.has(name.toLowerCase())) names.set(name.toLowerCase(), name)
-    if (names.size >= config.maxPlayers) break
+    if (names.size >= maxPlayers) break
   }
   return [...names.values()]
 }
@@ -145,8 +146,9 @@ async function removeContainer(name: string): Promise<void> {
 
 function containerSpec(world: World): Record<string, unknown> {
   const whitelist = whitelistNames(world.id)
+  const plan = worldPlan(world)
   // Der Container darf etwas mehr als die Java-Halde belegen (Metaspace, Threads, Netty).
-  const heapMiB = Math.max(1024, config.ramMiB - 512)
+  const heap = heapMiB(plan.ramMiB)
   const env: Record<string, string> = {
     EULA: 'TRUE',
     TYPE: 'PAPER',
@@ -154,7 +156,7 @@ function containerSpec(world: World): Record<string, unknown> {
     PAPER_BUILD: String(world.paper_build),
     // Klein anfangen und nach Bedarf wachsen: eine leere Welt belegt so nicht sofort den vollen Speicher.
     INIT_MEMORY: '512M',
-    MAX_MEMORY: `${heapMiB}M`,
+    MAX_MEMORY: `${heap}M`,
     JVM_XX_OPTS: [
       '-XX:+UseG1GC',
       '-XX:+ParallelRefProcEnabled',
@@ -167,7 +169,7 @@ function containerSpec(world: World): Record<string, unknown> {
     ].join(' '),
     TZ: 'Europe/Berlin',
     MOTD: `${world.name.replace(/[\\\n\r§]/g, ' ')} · ${config.brand}`,
-    MAX_PLAYERS: String(config.maxPlayers),
+    MAX_PLAYERS: String(plan.maxPlayers),
     MODE: world.gamemode,
     DIFFICULTY: world.difficulty,
     SEED: world.seed,
@@ -182,7 +184,7 @@ function containerSpec(world: World): Record<string, unknown> {
     ENABLE_AUTOPAUSE: 'false',
     STOP_DURATION: String(STOP_SECONDS - 10),
   }
-  const memoryBytes = config.ramMiB * 1024 * 1024
+  const memoryBytes = plan.ramMiB * 1024 * 1024
 
   return {
     Image: imageFor(world),
@@ -199,7 +201,8 @@ function containerSpec(world: World): Record<string, unknown> {
       RestartPolicy: { Name: 'no' },
       Memory: memoryBytes,
       MemorySwap: memoryBytes,
-      NanoCpus: Math.round(config.docker.cpus * 1e9),
+      // Docker lehnt mehr Kerne ab, als der Server hat — deshalb höchstens so viele.
+      NanoCpus: Math.round(Math.min(plan.cpus, hostCapacity().cpus) * 1e9),
       PidsLimit: 1024,
       CapDrop: ['ALL'],
       SecurityOpt: ['no-new-privileges'],
@@ -368,7 +371,7 @@ export const dockerDriver: RuntimeDriver = {
     try {
       const { output, exitCode } = await exec(containerName(world), ['rcon-cli', 'list'], 4000)
       if (exitCode !== 0) throw new Error('rcon-cli antwortet nicht')
-      const names = parsePlayerList(output)
+      const names = parsePlayerList(output, worldPlan(world).maxPlayers)
       memory.players = { at: now, names }
       return names
     } catch {
@@ -398,7 +401,7 @@ export const dockerDriver: RuntimeDriver = {
       const cores = stats.cpu_stats?.online_cpus ?? 1
       // Anteil an der erlaubten Obergrenze, nicht an der ganzen Maschine.
       const used = ((total - previous.total) / (system - previous.system)) * cores
-      cpuPercent = Math.min(100, Math.round((used / config.docker.cpus) * 100))
+      cpuPercent = Math.min(100, Math.round((used / Math.min(worldPlan(world).cpus, hostCapacity().cpus)) * 100))
     }
     const cache = stats.memory_stats?.stats?.inactive_file ?? stats.memory_stats?.stats?.total_inactive_file ?? 0
     const ramMiB = Math.max(0, Math.round(((stats.memory_stats?.usage ?? 0) - cache) / (1024 * 1024)))

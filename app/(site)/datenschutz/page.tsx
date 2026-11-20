@@ -1,10 +1,14 @@
 import type { Metadata } from 'next'
 import { LegalPage, Todo } from '@/components/legal'
 import { config } from '@/lib/config'
+import { imprint, imprintComplete } from '@/lib/imprint'
 
 export const metadata: Metadata = { title: 'Datenschutz' }
+// Die Angaben des Betreibers kommen aus dem Admin-Bereich und sollen sofort sichtbar sein.
+export const dynamic = 'force-dynamic'
 
 export default function PrivacyPage() {
+  const operator = imprint()
   const analytics = Boolean(config.analytics.umamiSrc || config.analytics.cloudflareBeaconToken)
   return (
     <LegalPage title="Datenschutz">
@@ -15,7 +19,17 @@ export default function PrivacyPage() {
 
       <h2>Wer ist verantwortlich?</h2>
       <p>
-        <Todo>Name, Anschrift und E-Mail des Betreibers</Todo>
+        {imprintComplete(operator) ? (
+          <>
+            {operator.name}
+            <br />
+            {operator.street}, {operator.city}, {operator.country}
+            <br />
+            E-Mail: <a href={`mailto:${operator.email}`}>{operator.email}</a>
+          </>
+        ) : (
+          <Todo>Name, Anschrift und E-Mail des Betreibers — im Admin-Bereich unter „Impressum“ eintragen</Todo>
+        )}
       </p>
 
       <h2>Was wir speichern, wenn du ein Konto anlegst</h2>
@@ -84,7 +98,7 @@ export default function PrivacyPage() {
       <p>
         Du hast das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit
         und Widerspruch sowie das Recht, dich bei einer Datenschutz-Aufsichtsbehörde zu beschweren. Schreib uns dazu an{' '}
-        <Todo>E-Mail-Adresse</Todo>.
+        {operator.email ? <a href={`mailto:${operator.email}`}>{operator.email}</a> : <Todo>E-Mail-Adresse</Todo>}.
       </p>
     </LegalPage>
   )

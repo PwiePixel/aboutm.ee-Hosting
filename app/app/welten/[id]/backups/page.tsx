@@ -5,6 +5,7 @@ import { requireUser } from '@/lib/auth'
 import { listBackups } from '@/lib/backups'
 import { config } from '@/lib/config'
 import { formatBytes, formatDateTime } from '@/lib/format'
+import { worldPlan } from '@/lib/plan'
 import { getWorld } from '@/lib/worlds'
 
 export const metadata: Metadata = { title: 'Backups' }
@@ -34,7 +35,7 @@ export default async function BackupsPage({ params }: { params: Promise<{ id: st
           <p className="mt-1 text-[13px] text-ink-dim">
             Wir behalten höchstens {config.maxAutoBackups} automatische Backups — das älteste macht Platz für das
             neueste. Eigene Backups bleiben unberührt (bis zu {config.maxManualBackups}). Alle Backups dieser Welt
-            zusammen dürfen {config.backupGiB} GiB belegen.
+            zusammen dürfen {worldPlan(world).backupGiB} GiB belegen.
           </p>
         </div>
         <AutoBackupSelect worldId={world.id} value={world.auto_backup} />

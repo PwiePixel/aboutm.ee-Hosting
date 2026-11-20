@@ -145,7 +145,9 @@ export function WorldOverview({ autoPauseMinutes }: { autoPauseMinutes: number }
       >
         <p className="mt-2 max-w-[520px] text-ink-dim">
           {playerCount === 0
-            ? `Gerade spielt niemand — schick deinen Freunden die IP. Nach ${autoPauseMinutes} Minuten ohne Spieler pausiert die Welt von selbst.`
+            ? autoPauseMinutes > 0
+              ? `Gerade spielt niemand — schick deinen Freunden die IP. Nach ${autoPauseMinutes} Minuten ohne Spieler pausiert die Welt von selbst.`
+              : 'Gerade spielt niemand — schick deinen Freunden die IP. Deine Welt bleibt online, bis du sie pausierst.'
             : playerCount === 1
               ? 'Gerade ist ein Spieler auf deiner Welt.'
               : `Gerade sind ${playerCount} Spieler auf deiner Welt.`}

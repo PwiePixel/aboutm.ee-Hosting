@@ -85,6 +85,32 @@ describe('Docker-Treiber', () => {
     expect(container(world)).toBeUndefined() // nach dem Stoppen wird der Container entfernt
   })
 
+  it('startet eine hochgestufte Welt mit den Werten ihres Pakets', async () => {
+    const plan = await import('@/lib/plan')
+    const world = newWorld()
+    plan.setWorldPlan(world.id, { ...plan.defaultPlan(), ramMiB: 4096, cpus: 1, maxPlayers: 50 })
+    await lib.requestStart(lib.getWorld(world.user_id, world.id)!)
+    await ticksUntil(world, 'online')
+
+    const spec = container(world)!.spec
+    expect(spec.HostConfig.Memory).toBe(4096 * 1024 * 1024)
+    expect(spec.HostConfig.MemorySwap).toBe(4096 * 1024 * 1024)
+    expect(spec.HostConfig.NanoCpus).toBe(1e9)
+    expect(spec.Env).toEqual(expect.arrayContaining(['MAX_MEMORY=3482M', 'MAX_PLAYERS=50']))
+    const properties = fs.readFileSync(path.join(process.env.DATA_DIR!, 'worlds', world.id, 'server.properties'), 'utf8')
+    expect(properties).toMatch(/^max-players=50$/m)
+    await lib.requestStop(world)
+    await ticksUntil(world, 'paused')
+
+    // Mehr Kerne, als der Server hat, lehnt Docker ab — der Start begrenzt deshalb auf das Vorhandene.
+    database.db().prepare('UPDATE worlds SET cpus = 9999 WHERE id = ?').run(world.id)
+    await lib.requestStart(lib.getWorld(world.user_id, world.id)!)
+    await ticksUntil(world, 'online')
+    expect(container(world)!.spec.HostConfig.NanoCpus).toBe(plan.hostCapacity().cpus * 1e9)
+    await lib.requestStop(world)
+    await ticksUntil(world, 'paused')
+  })
+
   it('stellt vor dem Start sicher, dass Paper direkte Verbindungen annimmt', async () => {
     const world = newWorld()
     const configDir = path.join(process.env.DATA_DIR!, 'worlds', world.id, 'config')

@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import { config } from './config'
 import { worldDir } from './paths'
+import { planOf } from './plan'
 import { Dir, UnsafeEntryError, withDir, type Owner } from './safe-fs'
 
 /**
@@ -20,7 +21,6 @@ export type FileEntry = {
 }
 
 const NAME = /^[A-Za-z0-9._ -]{1,64}$/
-const QUOTA_BYTES = config.diskGiB * 1024 ** 3
 
 /** Neue Dateien und Ordner sollen dem Benutzer gehören, unter dem der Minecraft-Server läuft. */
 const OWNER: Owner = { uid: config.docker.uid, gid: config.docker.gid }
@@ -131,6 +131,7 @@ export function writeTextFile(worldId: string, relative: string, content: string
   // Eine neue Datei direkt im Hauptordner darf den Weltordner anlegen, falls es ihn noch nicht gibt.
   if (options.create && parts.length === 0) fs.mkdirSync(root, { recursive: true })
   const used = directorySize(root)
+  const diskGiB = planOf(worldId).diskGiB
 
   inFolder(
     worldId,
@@ -142,8 +143,8 @@ export function writeTextFile(worldId: string, relative: string, content: string
       }
       if (existing && options.create) throw new FileError('Diese Datei gibt es schon.')
       if (!existing && !options.create) throw new FileError('Diese Datei gibt es nicht mehr.')
-      if (used - (existing?.size ?? 0) + bytes > QUOTA_BYTES) {
-        throw new FileError(`Der Speicher deiner Welt (${config.diskGiB} GiB) ist voll.`)
+      if (used - (existing?.size ?? 0) + bytes > diskGiB * 1024 ** 3) {
+        throw new FileError(`Der Speicher deiner Welt (${diskGiB} GiB) ist voll.`)
       }
       if (existing) dir.overwriteFile(name, content)
       else dir.createFile(name, content, OWNER)

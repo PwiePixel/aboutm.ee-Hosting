@@ -1,6 +1,7 @@
 import { db } from './db'
 import { runtime } from './runtime'
 import type { World, WorldStatus } from './runtime/types'
+import { worldPlan, type Plan } from './plan'
 import { limits } from './settings'
 import { worldAddress } from './worlds'
 
@@ -13,6 +14,7 @@ export type AdminWorld = {
   statusSince: number
   version: string
   createdAt: number
+  plan: Plan
 }
 
 export type LiveWorld = AdminWorld & { players: string[]; cpuPercent: number | null; ramMiB: number | null }
@@ -38,6 +40,7 @@ function toAdminWorld(row: Row): AdminWorld {
     statusSince: row.status_since,
     version: row.version,
     createdAt: row.created_at,
+    plan: worldPlan(row),
   }
 }
 
@@ -73,6 +76,12 @@ export async function adminLive(): Promise<AdminLive> {
 
 export function adminWorlds(): AdminWorld[] {
   return (db().prepare(`${WITH_OWNER} ORDER BY worlds.created_at DESC LIMIT 500`).all() as Row[]).map(toAdminWorld)
+}
+
+/** Eine Welt samt Konto für die Paket-Seite im Admin-Bereich. */
+export function adminWorld(worldId: string): AdminWorld | undefined {
+  const row = db().prepare(`${WITH_OWNER} WHERE worlds.id = ?`).get(worldId) as Row | undefined
+  return row ? toAdminWorld(row) : undefined
 }
 
 /** Ohne Besitzprüfung — nur für Aktionen, die vorher requireAdmin() aufgerufen haben. */

@@ -127,6 +127,15 @@ const MIGRATIONS: string[] = [
   -- bis auch kein Resolver den alten Eintrag mehr kennt.
   ALTER TABLE dns_cleanup ADD COLUMN removed_at INTEGER;
   `,
+  `
+  -- Paket je Welt: NULL bedeutet „Standardpaket“. Im Admin-Bereich lässt sich jede Welt einzeln hochstufen.
+  ALTER TABLE worlds ADD COLUMN ram_mib INTEGER;
+  ALTER TABLE worlds ADD COLUMN disk_gib INTEGER;
+  ALTER TABLE worlds ADD COLUMN cpus REAL;
+  ALTER TABLE worlds ADD COLUMN max_players INTEGER;
+  ALTER TABLE worlds ADD COLUMN backup_gib INTEGER;
+  ALTER TABLE worlds ADD COLUMN auto_pause_minutes INTEGER;
+  `,
 ]
 
 type Globals = { __amDb?: Database.Database }

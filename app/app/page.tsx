@@ -7,6 +7,7 @@ import { imageUrl, worldArt } from '@/lib/art'
 import { requireUser } from '@/lib/auth'
 import { config } from '@/lib/config'
 import { formatMiBAsGiB } from '@/lib/format'
+import { worldPlan } from '@/lib/plan'
 import { limits } from '@/lib/settings'
 import { listWorlds, slotsFree, worldAddress } from '@/lib/worlds'
 
@@ -95,7 +96,7 @@ export default async function WorldsPage({ searchParams }: { searchParams: Promi
                 <div className="p-5">
                   <h2 className="heading truncate text-[20px] group-hover:text-accent">{world.name}</h2>
                   <p className="mt-1 font-mono text-[12px] uppercase tracking-[0.08em] text-ink-faint">
-                    Paper {world.version} · {formatMiBAsGiB(config.ramMiB)}
+                    Paper {world.version} · {formatMiBAsGiB(worldPlan(world).ramMiB)}
                   </p>
                   <p className="mt-4 truncate font-mono text-[13px] text-ink-dim">{worldAddress(world)}</p>
                 </div>

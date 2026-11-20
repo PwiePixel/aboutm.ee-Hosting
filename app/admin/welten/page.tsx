@@ -2,7 +2,8 @@ import { AdminWorldActions } from '@/components/admin'
 import { StatusBadge } from '@/components/world-header'
 import { adminWorlds } from '@/lib/admin'
 import { requireAdmin } from '@/lib/auth'
-import { formatDateTime } from '@/lib/format'
+import { formatDateTime, formatMiBAsGiB } from '@/lib/format'
+import Link from 'next/link'
 
 export const dynamic = 'force-dynamic'
 
@@ -16,15 +17,16 @@ export default async function AdminWorldsPage() {
     <>
       <p className="mb-3 text-[14px] text-ink-dim">
         {worlds.length} {worlds.length === 1 ? 'Welt' : 'Welten'}. Konsole, Dateien und Backups sieht nur das Konto,
-        dem die Welt gehört.
+        dem die Welt gehört. Über „Paket“ gibst du einer Welt mehr Arbeitsspeicher, Speicherplatz und mehr.
       </p>
       <div className="panel overflow-x-auto">
-        <table className="w-full min-w-[760px] text-left text-[14px]">
+        <table className="w-full min-w-[900px] text-left text-[14px]">
           <thead className="border-b border-line text-[12px] uppercase tracking-[0.08em] text-ink-faint">
             <tr>
               <th className="px-4 py-3 font-semibold">Welt</th>
               <th className="px-4 py-3 font-semibold">Konto</th>
               <th className="px-4 py-3 font-semibold">Status</th>
+              <th className="px-4 py-3 font-semibold">Paket</th>
               <th className="px-4 py-3 font-semibold">Version</th>
               <th className="px-4 py-3 font-semibold">Erstellt</th>
               <th className="px-4 py-3" />
@@ -40,6 +42,12 @@ export default async function AdminWorldsPage() {
                 <td className="max-w-[220px] truncate px-4 py-3 text-ink-dim">{world.owner}</td>
                 <td className="px-4 py-3">
                   <StatusBadge status={world.status} />
+                </td>
+                <td className="whitespace-nowrap px-4 py-3">
+                  <Link href={`/admin/welten/${world.id}`} className="font-semibold underline-offset-4 hover:text-accent hover:underline">
+                    {formatMiBAsGiB(world.plan.ramMiB)} · {world.plan.diskGiB} GiB
+                  </Link>
+                  <p className="text-[12px] text-ink-faint">{world.plan.upgraded ? 'Upgrade' : 'Standard'} · ändern</p>
                 </td>
                 <td className="px-4 py-3 text-ink-dim">{world.version}</td>
                 <td className="whitespace-nowrap px-4 py-3 text-ink-dim">{formatDateTime(world.createdAt)}</td>

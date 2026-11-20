@@ -127,9 +127,11 @@ Antwort: `AM_ORIGIN_ALLOW= sudo -E ./install.sh`, oder `ORIGIN_ALLOW` in der `.e
 
 ### Vor dem Start erledigen
 
-- **Impressum** und **Datenschutz** ausfüllen: `app/(site)/impressum/page.tsx` und `app/(site)/datenschutz/page.tsx`.
-  Die gelb markierten Stellen sind Platzhalter. Mojang verlangt außerdem, dass klar ist, wer die Seite betreibt und
-  wie man ihn erreicht — eine echte Kontaktadresse (`SUPPORT_EMAIL` in `.env`) gehört also dazu.
+- **Impressum** ausfüllen: Admin → Impressum. Name, Anschrift, E-Mail und (freiwillig) Telefon trägst du dort ein;
+  sie erscheinen im Impressum und in der Datenschutzerklärung. Mojang verlangt außerdem, dass klar ist, wer die
+  Seite betreibt und wie man ihn erreicht.
+- **Datenschutz** prüfen: `app/(site)/datenschutz/page.tsx`. Die gelb markierten Stellen (z. B. Serverstandort) sind
+  Platzhalter. Beide Texte sind Vorlagen und ersetzen keine rechtliche Prüfung.
 - **Bilder** hochladen: Admin → Bilder.
 
 ## Bilder
@@ -143,6 +145,19 @@ Rechte am Spiel liegen bei Mojang und Microsoft, deren
 [Usage Guidelines](https://www.minecraft.net/de-de/usage-guidelines) eigene Screenshots unter Bedingungen erlauben —
 unter anderem mit dem Hinweis „Not an official Minecraft service …“, der hier auf jeder Seite steht. Fremde Bilder
 aus dem Netz brauchen zusätzlich die Erlaubnis dessen, der sie gemacht hat.
+
+## Pakete: einer Welt mehr geben
+
+Jede Welt startet im kostenlosen Standardpaket (2,5 GiB Arbeitsspeicher, 6 GiB Speicherplatz, 20 Spielerplätze,
+12 GiB für Backups, Auto-Pause wie im Admin-Bereich eingestellt). Unter **Admin → Alle Welten → Paket** stufst du
+eine einzelne Welt hoch: Arbeitsspeicher, Speicherplatz, CPU-Kerne, Spielerplätze, Backup-Speicher und Auto-Pause
+(0 = die Welt bleibt online, bis sie jemand pausiert). „Auf Standard zurücksetzen“ nimmt alles wieder zurück.
+
+- Speicherplatz, Backup-Speicher und Auto-Pause gelten sofort; Arbeitsspeicher, CPU und Spielerplätze beim nächsten
+  Start der Welt.
+- Gespeichert wird nur, was vom Standard abweicht — alles andere folgt weiter dem Standard.
+- Arbeitsspeicher wird nicht reserviert. Vergib insgesamt nicht mehr, als die gleichzeitig laufenden Welten auf dem
+  Server wirklich belegen können; die Seite zeigt dazu an, wie viel RAM und wie viele Kerne der Server hat.
 
 ## Statistik
 

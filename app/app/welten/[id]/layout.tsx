@@ -7,8 +7,8 @@ import { CopyAddress, LiveError, LiveStatusBadge, QuickControl, WorldTabs } from
 import { WorldLiveProvider } from '@/components/world-live'
 import { worldArt } from '@/lib/art'
 import { requireUser } from '@/lib/auth'
-import { config } from '@/lib/config'
 import { formatMiBAsGiB } from '@/lib/format'
+import { worldPlan } from '@/lib/plan'
 import { buildStatus } from '@/lib/status'
 import { getWorld, worldAddress } from '@/lib/worlds'
 
@@ -40,7 +40,7 @@ export default async function WorldLayout({
         <div className="absolute inset-x-0 bottom-0 p-5 sm:p-7">
           <h1 className="display break-words text-[clamp(32px,6.5vw,60px)]">{world.name}</h1>
           <p className="mt-2 font-mono text-[12px] font-semibold uppercase tracking-[0.14em] text-ink-dim">
-            Paper {world.version} · {formatMiBAsGiB(config.ramMiB)}
+            Paper {world.version} · {formatMiBAsGiB(worldPlan(world).ramMiB)}
           </p>
         </div>
       </div>

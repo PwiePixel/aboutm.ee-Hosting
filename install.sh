@@ -758,7 +758,8 @@ EOF
     printf '  Welten:       %s:<Port>\n\n' "$NODE_HOST"
   fi
   printf '  Noch zu tun:\n'
-  printf '   • Impressum und Datenschutz ausfüllen (app/(site)/impressum und …/datenschutz), danach: docker compose up -d --build\n'
+  printf '   • Impressum ausfüllen: https://%s/admin/impressum (Name, Anschrift, E-Mail)\n' "$SITE_DOMAIN"
+  printf '   • Datenschutzerklärung prüfen und die markierten Stellen ergänzen (app/(site)/datenschutz), danach: docker compose up -d --build\n'
   printf '   • Eigene Bilder hochladen: https://%s/admin/bilder\n' "$SITE_DOMAIN"
   printf '   • Den Ordner %s regelmäßig extern sichern\n\n' "$DATA_PATH"
   printf '  Aktualisieren: cd %s && git pull && sudo ./install.sh\n' "$INSTALL_DIR"

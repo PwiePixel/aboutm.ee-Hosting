@@ -6,6 +6,7 @@ import { newWorldId, randomId } from './ids'
 import { finishRecordRemoval, pendingCleanupPorts, queueRecordRemoval } from './dns'
 import { isLocked } from './locks'
 import { backupsDir, worldDir } from './paths'
+import { worldPlan } from './plan'
 import { runtime } from './runtime'
 import type { RuntimeDriver, RuntimeState, World, WorldStatus } from './runtime/types'
 import { Dir, removeTree, withDir, type Owner } from './safe-fs'
@@ -285,7 +286,7 @@ export function writeManagedFiles(world: World): void {
 
   const managed: Record<string, string> = {
     motd: `${world.name.replace(/[\\\n\r]/g, ' ')} · ${config.brand}`,
-    'max-players': String(config.maxPlayers),
+    'max-players': String(worldPlan(world).maxPlayers),
     gamemode: world.gamemode,
     difficulty: world.difficulty,
     'level-seed': world.seed.replace(/[\n\r]/g, ' '),
@@ -405,9 +406,10 @@ export async function requestStart(world: World): Promise<StartResult> {
     throw new WorldError(`Pro Konto läuft eine Welt gleichzeitig. Pausiere zuerst „${busy.name}“.`)
   }
 
-  if (directorySize(worldDir(current.id)) > DISK_QUOTA_BYTES) {
+  const plan = worldPlan(current)
+  if (directorySize(worldDir(current.id)) > diskQuotaBytes(plan.diskGiB)) {
     throw new WorldError(
-      `Der Speicher deiner Welt (${config.diskGiB} GiB) ist voll. Lösche unter „Dateien“ etwas, dann lässt sie sich wieder starten.`,
+      `Der Speicher deiner Welt (${plan.diskGiB} GiB) ist voll. Lösche unter „Dateien“ etwas, dann lässt sie sich wieder starten.`,
     )
   }
 
@@ -464,7 +466,7 @@ export async function consoleLines(world: World): Promise<string[]> {
 type Hooks = { afterPause?: (world: World) => Promise<void> | void }
 type Globals = { __amTick?: { running: boolean; last: number }; __amDiskChecks?: Map<string, number> }
 
-const DISK_QUOTA_BYTES = config.diskGiB * 1024 ** 3
+const diskQuotaBytes = (diskGiB: number) => diskGiB * 1024 ** 3
 const DISK_CHECK_MS = 5 * 60_000
 
 /** Die Ordnergröße zu messen kostet Zeit — deshalb je Welt nur alle paar Minuten. */
@@ -494,7 +496,6 @@ export async function tick(hooks: Hooks = {}, now = Date.now()): Promise<void> {
     const active = db()
       .prepare(`SELECT * FROM worlds WHERE status IN ('starting', 'online', 'stopping')`)
       .all() as World[]
-    const autoPauseMs = limits().autoPauseMinutes * 60_000
 
     // Alle Server gleichzeitig befragen — ein einzelner, der nicht antwortet, hält die anderen nicht auf.
     const observed = await Promise.all(active.map((world) => observe(driver, world)))
@@ -535,12 +536,15 @@ export async function tick(hooks: Hooks = {}, now = Date.now()): Promise<void> {
               playersOnline.add(key)
               return true
             })
-            if (diskCheckDue(world.id, now) && directorySize(worldDir(world.id)) > DISK_QUOTA_BYTES) {
+            // Das Paket der Welt bestimmt Speicherplatz und Auto-Pause (0 Minuten = nie von selbst pausieren).
+            const plan = worldPlan(world)
+            const autoPauseMs = plan.autoPauseMinutes * 60_000
+            if (diskCheckDue(world.id, now) && directorySize(worldDir(world.id)) > diskQuotaBytes(plan.diskGiB)) {
               await requestStop(world, 'disk')
             } else if (players.length > 0) {
               db().prepare('UPDATE worlds SET last_active_at = ? WHERE id = ?').run(now, world.id)
               recordPlay(world.id, players, elapsedMs, now)
-            } else if (now - (world.last_active_at ?? world.status_since) >= autoPauseMs) {
+            } else if (autoPauseMs > 0 && now - (world.last_active_at ?? world.status_since) >= autoPauseMs) {
               await requestStop(world, 'idle')
             }
           }

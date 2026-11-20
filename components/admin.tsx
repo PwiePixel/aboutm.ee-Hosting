@@ -10,11 +10,16 @@ import {
   adminDeleteWorldAction,
   adminPauseWorldAction,
   removeImageAction,
+  resetWorldPlanAction,
+  saveImprintAction,
   saveLimitsAction,
+  saveWorldPlanAction,
   uploadImageAction,
 } from '@/lib/actions/admin'
 import { EMPTY } from '@/lib/actions/state'
 import type { AdminLive } from '@/lib/admin'
+import type { Imprint } from '@/lib/imprint'
+import type { Plan, PlanValues } from '@/lib/plan'
 import type { Limits } from '@/lib/settings'
 import { ConfirmButton } from './confirm'
 import { FormMessage, SubmitButton } from './form'
@@ -26,6 +31,7 @@ const TABS = [
   { segment: 'konten', href: '/admin/konten', label: 'Konten' },
   { segment: 'nachrichten', href: '/admin/nachrichten', label: 'Nachrichten' },
   { segment: 'bilder', href: '/admin/bilder', label: 'Bilder' },
+  { segment: 'impressum', href: '/admin/impressum', label: 'Impressum' },
 ] as const
 
 export function AdminTabs() {
@@ -380,5 +386,175 @@ export function ImageSlotCard({
         </form>
       </div>
     </li>
+  )
+}
+
+const gib = (mib: number) => (mib / 1024).toLocaleString('de-DE', { maximumFractionDigits: 1 })
+
+/** Paket einer Welt hochstufen: mehr Arbeitsspeicher, Speicherplatz, CPU und so weiter. */
+export function PlanForm({
+  worldId,
+  plan,
+  standard,
+  host,
+}: {
+  worldId: string
+  plan: Plan
+  standard: PlanValues
+  host: { ramMiB: number; cpus: number }
+}) {
+  const [state, action] = useActionState(saveWorldPlanAction, EMPTY)
+  const fields: Array<{ name: string; label: string; unit: string; value: number; min: number; max: number; step: number; hint: string }> = [
+    {
+      name: 'ramGiB',
+      label: 'Arbeitsspeicher',
+      unit: 'GiB',
+      value: plan.ramMiB / 1024,
+      min: 2,
+      max: Math.min(64, Math.floor(host.ramMiB / 512) / 2),
+      step: 0.5,
+      hint: `Standard: ${gib(standard.ramMiB)} GiB · dieser Server hat ${gib(host.ramMiB)} GiB`,
+    },
+    {
+      name: 'diskGiB',
+      label: 'Speicherplatz (SSD)',
+      unit: 'GiB',
+      value: plan.diskGiB,
+      min: 1,
+      max: 500,
+      step: 1,
+      hint: `Standard: ${standard.diskGiB} GiB für Welt und Plugins`,
+    },
+    {
+      name: 'cpus',
+      label: 'CPU-Kerne',
+      unit: 'Kerne',
+      value: plan.cpus,
+      min: 0.5,
+      max: Math.min(64, host.cpus),
+      step: 0.5,
+      hint: `Standard: ${standard.cpus.toLocaleString('de-DE')} · dieser Server hat ${host.cpus}`,
+    },
+    {
+      name: 'maxPlayers',
+      label: 'Spielerplätze',
+      unit: 'Spieler',
+      value: plan.maxPlayers,
+      min: 1,
+      max: 500,
+      step: 1,
+      hint: `Standard: ${standard.maxPlayers}`,
+    },
+    {
+      name: 'backupGiB',
+      label: 'Backup-Speicher',
+      unit: 'GiB',
+      value: plan.backupGiB,
+      min: 1,
+      max: 1000,
+      step: 1,
+      hint: `Standard: ${standard.backupGiB} GiB für alle Backups der Welt zusammen`,
+    },
+    {
+      name: 'autoPauseMinutes',
+      label: 'Auto-Pause',
+      unit: 'Minuten',
+      value: plan.autoPauseMinutes,
+      min: 0,
+      max: 1440,
+      step: 1,
+      hint: `Standard: ${standard.autoPauseMinutes} · 0 = die Welt bleibt online, bis sie jemand pausiert`,
+    },
+  ]
+  return (
+    <form action={action} className="space-y-5">
+      <input type="hidden" name="worldId" value={worldId} />
+      <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        {fields.map((field) => (
+          <div key={field.name}>
+            <label htmlFor={field.name} className="label">
+              {field.label} <span className="font-normal text-ink-faint">({field.unit})</span>
+            </label>
+            <input
+              // Ändert sich der gespeicherte Wert (etwa durch „Zurücksetzen“), zeigt das Feld ihn neu an.
+              key={field.value}
+              id={field.name}
+              name={field.name}
+              type="number"
+              inputMode="decimal"
+              min={field.min}
+              max={field.max}
+              step={field.step}
+              required
+              defaultValue={field.value}
+              className="field"
+              aria-describedby={`${field.name}-hint`}
+            />
+            <p id={`${field.name}-hint`} className="hint">
+              {field.hint}
+            </p>
+          </div>
+        ))}
+      </div>
+      <FormMessage state={state} />
+      <div className="flex flex-wrap items-center gap-3">
+        <SubmitButton>Paket speichern</SubmitButton>
+        {plan.upgraded && (
+          <ConfirmButton
+            className="btn"
+            title="Zurück auf das Standardpaket?"
+            text={<>Die Welt bekommt wieder die Werte des kostenlosen Pakets. Ihre Dateien bleiben erhalten.</>}
+            confirmLabel="Zurücksetzen"
+            action={() => resetWorldPlanAction(worldId)}
+          >
+            Auf Standard zurücksetzen
+          </ConfirmButton>
+        )}
+      </div>
+    </form>
+  )
+}
+
+/** Angaben des Betreibers für Impressum und Datenschutzerklärung. */
+export function ImprintForm({ imprint }: { imprint: Imprint }) {
+  const [state, action] = useActionState(saveImprintAction, EMPTY)
+  const fields: Array<{ name: keyof Omit<Imprint, 'updatedAt'>; label: string; hint?: string; type?: string; required?: boolean; autoComplete?: string }> = [
+    { name: 'name', label: 'Vor- und Nachname oder Firma', required: true, autoComplete: 'name' },
+    { name: 'street', label: 'Straße und Hausnummer', required: true, autoComplete: 'street-address' },
+    { name: 'city', label: 'PLZ und Ort', required: true },
+    { name: 'country', label: 'Land', required: true, autoComplete: 'country-name' },
+    { name: 'email', label: 'E-Mail-Adresse', type: 'email', required: true, hint: 'Auch für Meldungen rechtswidriger Inhalte.', autoComplete: 'email' },
+    { name: 'phone', label: 'Telefon', type: 'tel', hint: 'Freiwillig — ohne Angabe erscheint keine Zeile.', autoComplete: 'tel' },
+  ]
+  return (
+    <form action={action} className="space-y-5">
+      <div className="grid gap-5 sm:grid-cols-2">
+        {fields.map((field) => (
+          <div key={field.name}>
+            <label htmlFor={`imprint-${field.name}`} className="label">
+              {field.label}
+            </label>
+            <input
+              id={`imprint-${field.name}`}
+              name={field.name}
+              type={field.type ?? 'text'}
+              required={field.required}
+              maxLength={200}
+              defaultValue={imprint[field.name]}
+              autoComplete={field.autoComplete}
+              className="field"
+              aria-describedby={field.hint ? `imprint-${field.name}-hint` : undefined}
+            />
+            {field.hint && (
+              <p id={`imprint-${field.name}-hint`} className="hint">
+                {field.hint}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+      <FormMessage state={state} />
+      <SubmitButton>Speichern</SubmitButton>
+    </form>
   )
 }

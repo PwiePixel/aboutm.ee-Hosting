@@ -5,6 +5,7 @@ import { directorySize } from './files'
 import { newBackupId } from './ids'
 import { withWorldLock } from './locks'
 import { backupDir, backupsDir, worldDir } from './paths'
+import { planOf } from './plan'
 import type { World } from './runtime/types'
 import { removeTree, withDir, withDirAsync } from './safe-fs'
 
@@ -19,8 +20,6 @@ export type Backup = {
   created_at: number
 }
 
-/** Alle Backups einer Welt zusammen dürfen höchstens so viel belegen. */
-const BACKUP_QUOTA_BYTES = config.backupGiB * 1024 ** 3
 const BUSY = 'Für diese Welt läuft gerade schon ein Backup oder eine Wiederherstellung. Versuch es gleich noch einmal.'
 
 export function listBackups(worldId: string): Backup[] {
@@ -60,18 +59,21 @@ export async function createBackup(world: World, kind: 'manual' | 'auto'): Promi
   }
 
   const worldBytes = directorySize(source)
+  // Alle Backups einer Welt zusammen dürfen höchstens so viel belegen, wie ihr Paket vorsieht.
+  const backupGiB = planOf(world.id).backupGiB
+  const quotaBytes = backupGiB * 1024 ** 3
   if (kind === 'auto') {
     // Älteste automatische Backups weichen, bis das neue Platz hat.
     const automatic = listBackups(world.id)
       .filter((entry) => entry.kind === 'auto')
       .reverse()
-    while (automatic.length > 0 && totalBackupBytes(world.id) + worldBytes > BACKUP_QUOTA_BYTES) {
+    while (automatic.length > 0 && totalBackupBytes(world.id) + worldBytes > quotaBytes) {
       removeBackup(world.id, automatic.shift()!.id)
     }
   }
-  if (totalBackupBytes(world.id) + worldBytes > BACKUP_QUOTA_BYTES) {
+  if (totalBackupBytes(world.id) + worldBytes > quotaBytes) {
     throw new BackupError(
-      `Für die Backups dieser Welt stehen ${config.backupGiB} GiB bereit — das reicht für ein weiteres nicht mehr. Lösche ein älteres Backup.`,
+      `Für die Backups dieser Welt stehen ${backupGiB} GiB bereit — das reicht für ein weiteres nicht mehr. Lösche ein älteres Backup.`,
     )
   }
 

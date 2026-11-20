@@ -7,6 +7,8 @@ import { adminGetWorld } from '../admin'
 import { IMAGE_TYPES, imagesDir, isImageSlot, type ImageExtension } from '../art'
 import { requireAdmin } from '../auth'
 import { db } from '../db'
+import { IMPRINT_FIELDS, saveImprint, type ImprintField } from '../imprint'
+import { planProblem, resetWorldPlan, setWorldPlan, type PlanValues } from '../plan'
 import { LIMIT_RANGES, setLimit, type Limits } from '../settings'
 import { deleteUserWithWorlds, deleteWorld, requestStop } from '../worlds'
 import type { ActionState } from './state'
@@ -129,4 +131,76 @@ export async function removeImageAction(slot: string): Promise<ActionState> {
   removeImage(slot)
   revalidatePath('/', 'layout')
   return {}
+}
+
+// ───────────────────────── Paket einer Welt ─────────────────────────
+
+/** Liest eine Zahl aus einem Formularfeld; ein Komma als Dezimaltrennzeichen ist erlaubt. */
+function numberField(formData: FormData, name: string): number {
+  const raw = String(formData.get(name) ?? '').trim().replace(',', '.')
+  return /^\d+(\.\d+)?$/.test(raw) ? Number(raw) : Number.NaN
+}
+
+export async function saveWorldPlanAction(_previous: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAdmin()
+  const world = adminGetWorld(String(formData.get('worldId') ?? ''))
+  if (!world) return { error: 'Diese Welt gibt es nicht mehr.' }
+
+  const values: PlanValues = {
+    // Im Formular steht der Arbeitsspeicher in GiB (in Schritten von 0,5).
+    ramMiB: Math.round(numberField(formData, 'ramGiB') * 1024),
+    diskGiB: numberField(formData, 'diskGiB'),
+    cpus: numberField(formData, 'cpus'),
+    maxPlayers: numberField(formData, 'maxPlayers'),
+    backupGiB: numberField(formData, 'backupGiB'),
+    autoPauseMinutes: numberField(formData, 'autoPauseMinutes'),
+  }
+  if (Number.isFinite(values.ramMiB) && values.ramMiB % 512 !== 0) {
+    return { error: 'Arbeitsspeicher: Bitte in Schritten von 0,5 GiB angeben.' }
+  }
+  const problem = planProblem(values)
+  if (problem) return { error: problem }
+  setWorldPlan(world.id, values)
+
+  revalidatePath('/admin', 'layout')
+  revalidatePath(`/app/welten/${world.id}`, 'layout')
+  revalidatePath('/app')
+  const running = world.status !== 'paused'
+  return {
+    ok: running
+      ? 'Gespeichert. Speicherplatz, Backups und Auto-Pause gelten sofort; Arbeitsspeicher, CPU und Spielerplätze ab dem nächsten Start der Welt.'
+      : 'Gespeichert. Das Paket gilt ab dem nächsten Start der Welt.',
+  }
+}
+
+export async function resetWorldPlanAction(worldId: string): Promise<ActionState> {
+  await requireAdmin()
+  const world = adminGetWorld(String(worldId))
+  if (!world) return { error: 'Diese Welt gibt es nicht mehr.' }
+  resetWorldPlan(world.id)
+  revalidatePath('/admin', 'layout')
+  revalidatePath(`/app/welten/${world.id}`, 'layout')
+  revalidatePath('/app')
+  return {}
+}
+
+// ───────────────────────── Impressum ─────────────────────────
+
+export async function saveImprintAction(_previous: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAdmin()
+  const values = {} as Record<ImprintField, string>
+  for (const field of IMPRINT_FIELDS) {
+    // Einzeilig und ohne Steuerzeichen; die Länge begrenzen.
+    values[field] = String(formData.get(field) ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 200)
+  }
+  if (!values.name || !values.street || !values.city || !values.country) {
+    return { error: 'Name, Straße, Ort und Land gehören ins Impressum — bitte alle vier ausfüllen.' }
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(values.email)) return { error: 'Bitte eine gültige E-Mail-Adresse angeben.' }
+  if (values.phone && !/^[0-9+()\/ .-]{5,40}$/.test(values.phone)) return { error: 'Die Telefonnummer enthält ungültige Zeichen.' }
+  saveImprint(values)
+  revalidatePath('/impressum')
+  revalidatePath('/datenschutz')
+  revalidatePath('/admin/impressum')
+  return { ok: 'Gespeichert. Impressum und Datenschutzerklärung zeigen die neuen Angaben.' }
 }

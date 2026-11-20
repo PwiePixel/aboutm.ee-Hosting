@@ -26,7 +26,8 @@ export default async function WorldOverviewPage({
   const user = await requireUser()
   const world = getWorld(user.id, (await params).id)
   if (!world) notFound()
-  const created = (await searchParams).neu === '1'
+  // Der Hinweis „jetzt starten“ passt nur, solange die Welt noch nicht gestartet wurde.
+  const created = (await searchParams).neu === '1' && world.status === 'paused' && world.starts === 0
 
   const details: Array<[string, React.ReactNode]> = [
     ['Version', `Paper ${world.version}`],

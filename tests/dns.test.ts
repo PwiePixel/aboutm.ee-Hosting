@@ -123,12 +123,35 @@ describe('Adresse einer Welt', () => {
     await worlds.deleteWorld(fresh(world)) // die Welt ist weg, der Eintrag noch da
     expect(worlds.getWorld(world.user_id, world.id)).toBeUndefined()
     expect(srv().some((record) => record.id === recordId)).toBe(true)
-    expect(database.db().prepare('SELECT record_id FROM dns_cleanup').all()).toEqual([{ record_id: recordId }])
+    expect(database.db().prepare('SELECT record_id, port FROM dns_cleanup').all()).toEqual([{ record_id: recordId, port: world.port }])
+
+    // Solange der alte Name noch auf den Port zeigt, bekommt keine neue Welt diesen Port.
+    const next = worlds.createWorld(newUser(), INPUT)
+    expect(next.port).not.toBe(world.port)
 
     cloudflare.state.failDns = false
     await dns.dnsMaintenance()
     expect(srv().some((record) => record.id === recordId)).toBe(false)
     expect(database.db().prepare('SELECT COUNT(*) AS n FROM dns_cleanup').get()).toEqual({ n: 0 })
+    // Danach ist der Port wieder frei.
+    await worlds.deleteWorld(fresh(next))
+    expect(worlds.createWorld(newUser(), INPUT).port).toBe(world.port)
+    for (const row of database.db().prepare('SELECT * FROM worlds').all() as Array<{ id: string; user_id: string }>) {
+      await worlds.deleteWorld(fresh(row))
+    }
+  })
+
+  it('räumt beim Löschen auch einen Eintrag weg, dessen Kennung nie gespeichert wurde', async () => {
+    const world = worlds.createWorld(newUser(), INPUT)
+    // Der Eintrag existiert bei Cloudflare, aber die Datenbank weiß nichts davon (etwa nach einem Absturz).
+    await fetch(`${cloudflare.url}/zones/zone1/dns_records`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'SRV', name: dns.recordName(world), data: { priority: 0, weight: 5, port: world.port, target: 'node.example.com' }, ttl: 60 }),
+    })
+    expect(fresh(world).dns_record_id).toBeNull()
+    await worlds.deleteWorld(fresh(world))
+    expect(srv().filter((record) => record.name === dns.recordName(world))).toHaveLength(0)
   })
 
   it('übernimmt einen schon vorhandenen Eintrag und stellt ihn auf den richtigen Port', async () => {

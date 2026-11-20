@@ -114,8 +114,11 @@ const MIGRATIONS: string[] = [
   CREATE UNIQUE INDEX worlds_port ON worlds(port) WHERE port IS NOT NULL;
 
   -- DNS-Einträge gelöschter Welten, die sich noch nicht entfernen ließen — werden später nachgeholt.
+  -- Bis dahin bleibt ihr Port gesperrt: Der alte Name zeigt noch darauf und darf bei keiner neuen Welt landen.
   CREATE TABLE dns_cleanup (
-    record_id TEXT PRIMARY KEY,
+    name TEXT PRIMARY KEY,
+    record_id TEXT,
+    port INTEGER,
     created_at INTEGER NOT NULL
   );
   `,

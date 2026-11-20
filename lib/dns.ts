@@ -53,9 +53,9 @@ async function cloudflare<T>(method: string, path: string, body?: unknown): Prom
   }
   if (!response.ok || envelope?.success !== true) {
     // Ein Eintrag, den es nicht (mehr) gibt, ist beim Löschen kein Fehler. Cloudflare meldet das als 404
-    // oder mit dem Code 81044.
+    // oder mit dem Code 81044. Bei allen anderen Aufrufen bleibt „nicht gefunden“ ein Fehler.
     const gone = response.status === 404 || envelope?.errors?.some((entry) => entry.code === 81044)
-    if (gone) return { status: 404, result: null }
+    if (method === 'DELETE' && gone) return { status: 404, result: null }
     const reason = envelope?.errors?.map((entry) => entry.message).filter(Boolean).join('; ') || `HTTP ${response.status}`
     throw new DnsError(`Cloudflare lehnt ab (${method} ${path.split('?')[0]}): ${reason}`)
   }
@@ -99,25 +99,46 @@ export async function ensureWorldRecord(world: World): Promise<boolean> {
   // Nur eintragen, wenn es die Welt noch gibt — sonst den eben angelegten Eintrag wieder wegräumen.
   const updated = db().prepare('UPDATE worlds SET dns_record_id = ? WHERE id = ?').run(id, world.id)
   if (updated.changes === 0) {
-    await removeRecord(id)
+    await removeWorldRecord(world)
     return false
   }
   return true
 }
 
-/**
- * Entfernt einen SRV-Eintrag. Klappt das gerade nicht, wird er vorgemerkt und später nachgeholt —
- * ein verwaister Eintrag würde sonst für immer auf einen Port zeigen, der längst neu vergeben sein kann.
- */
-export async function removeRecord(recordId: string): Promise<void> {
-  if (!dnsEnabled()) return
-  try {
-    await cloudflare('DELETE', `/dns_records/${encodeURIComponent(recordId)}`)
-    db().prepare('DELETE FROM dns_cleanup WHERE record_id = ?').run(recordId)
-  } catch (error) {
-    db().prepare('INSERT OR IGNORE INTO dns_cleanup (record_id, created_at) VALUES (?, ?)').run(recordId, Date.now())
-    console.error(`[aboutm.ee] DNS-Eintrag ${recordId} ließ sich nicht entfernen:`, error instanceof Error ? error.message : error)
+/** Löscht alle SRV-Einträge unter dem Namen der Welt — auch einen, dessen Kennung nie gespeichert wurde. */
+async function deleteByName(name: string): Promise<void> {
+  const found = await cloudflare<DnsRecord[]>('GET', `/dns_records?type=SRV&name.exact=${encodeURIComponent(name)}`)
+  for (const record of found.result ?? []) {
+    if (record.type === 'SRV' && record.name === name) await cloudflare('DELETE', `/dns_records/${encodeURIComponent(record.id)}`)
   }
+}
+
+/**
+ * Entfernt den SRV-Eintrag einer gelöschten Welt. Klappt das gerade nicht, wird er vorgemerkt und später
+ * nachgeholt — und ihr Port bleibt so lange gesperrt (siehe pendingCleanupPorts). Ein verwaister Eintrag
+ * würde sonst auf einen Port zeigen, den inzwischen eine fremde Welt hat.
+ */
+export async function removeWorldRecord(world: Pick<World, 'host_label' | 'port' | 'dns_record_id'>): Promise<void> {
+  if (!dnsEnabled()) return
+  const name = recordName(world)
+  try {
+    if (world.dns_record_id) await cloudflare('DELETE', `/dns_records/${encodeURIComponent(world.dns_record_id)}`)
+    // Zusätzlich nach dem Namen suchen: Ein Eintrag kann bei Cloudflare angelegt worden sein, ohne dass seine
+    // Kennung noch in der Datenbank ankam.
+    await deleteByName(name)
+    db().prepare('DELETE FROM dns_cleanup WHERE name = ?').run(name)
+  } catch (error) {
+    db()
+      .prepare('INSERT OR REPLACE INTO dns_cleanup (name, record_id, port, created_at) VALUES (?, ?, ?, ?)')
+      .run(name, world.dns_record_id, world.port, Date.now())
+    console.error(`[aboutm.ee] DNS-Eintrag ${name} ließ sich nicht entfernen:`, error instanceof Error ? error.message : error)
+  }
+}
+
+/** Ports, auf die noch ein nicht entfernter Eintrag einer gelöschten Welt zeigt — sie werden nicht neu vergeben. */
+export function pendingCleanupPorts(): number[] {
+  const rows = db().prepare('SELECT port FROM dns_cleanup WHERE port IS NOT NULL').all() as Array<{ port: number }>
+  return rows.map((row) => row.port)
 }
 
 /** Holt nach, was beim ersten Versuch nicht geklappt hat: fehlende Einträge anlegen, verwaiste entfernen. */
@@ -136,10 +157,20 @@ export async function dnsMaintenance(): Promise<void> {
     }
   }
 
-  const orphans = db().prepare('SELECT record_id FROM dns_cleanup ORDER BY created_at LIMIT 5').all() as Array<{
-    record_id: string
+  const orphans = db().prepare('SELECT name, record_id, port FROM dns_cleanup ORDER BY created_at LIMIT 5').all() as Array<{
+    name: string
+    record_id: string | null
+    port: number | null
   }>
-  for (const orphan of orphans) await removeRecord(orphan.record_id)
+  for (const orphan of orphans) {
+    try {
+      if (orphan.record_id) await cloudflare('DELETE', `/dns_records/${encodeURIComponent(orphan.record_id)}`)
+      await deleteByName(orphan.name)
+      db().prepare('DELETE FROM dns_cleanup WHERE name = ?').run(orphan.name)
+    } catch {
+      break // später noch einmal
+    }
+  }
 }
 
 export type DnsUsage = { used: number; quota: number | null }

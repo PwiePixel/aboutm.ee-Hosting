@@ -3,7 +3,7 @@ import { config } from './config'
 import { db } from './db'
 import { directorySize } from './files'
 import { newWorldId, randomId } from './ids'
-import { removeRecord } from './dns'
+import { pendingCleanupPorts, removeWorldRecord } from './dns'
 import { isLocked } from './locks'
 import { backupsDir, worldDir } from './paths'
 import { runtime } from './runtime'
@@ -35,6 +35,8 @@ function freePort(): number {
   const taken = new Set(
     (db().prepare('SELECT port FROM worlds WHERE port IS NOT NULL').all() as Array<{ port: number }>).map((row) => row.port),
   )
+  // Ports gelöschter Welten bleiben gesperrt, solange ihr alter DNS-Eintrag noch nicht entfernt ist.
+  for (const port of pendingCleanupPorts()) taken.add(port)
   for (let port = config.portMin; port <= config.portMax; port++) {
     if (!taken.has(port)) return port
   }
@@ -171,7 +173,7 @@ export async function deleteWorld(world: World): Promise<void> {
   await runtime().destroy(current)
   db().prepare('DELETE FROM worlds WHERE id = ?').run(world.id)
   // Der SRV-Eintrag muss mit weg — der Port wird neu vergeben und zeigte sonst auf eine fremde Welt.
-  if (current.dns_record_id) await removeRecord(current.dns_record_id)
+  await removeWorldRecord(current)
   removeTree(worldDir(world.id))
   removeTree(backupsDir(world.id))
 }

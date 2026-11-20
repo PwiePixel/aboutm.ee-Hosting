@@ -3,7 +3,8 @@ import type { ImageSlot } from './art'
 /**
  * Herkunft der mitgelieferten Bilder in public/art/.
  *
- * Alle sind echte Minecraft-Screenshots, die ihr Urheber auf Flickr unter CC BY 2.0 veröffentlicht hat.
+ * Alle sind echte Minecraft-Screenshots, die ihre Urheber auf Flickr unter CC BY 2.0 veröffentlicht haben
+ * (Lizenz am 20.11.2026 auf den jeweiligen Flickr-Seiten geprüft).
  * Die Lizenz erlaubt die Nutzung — auch kommerziell — unter der Bedingung, dass Urheber, Quelle und
  * Lizenz genannt und Änderungen kenntlich gemacht werden. Das erledigt die Seite /bildnachweise.
  * Wer ein Bild austauscht, muss diese Liste mitpflegen.
@@ -45,5 +46,14 @@ export const CREDITS: readonly Credit[] = [
   flickr('welt-3', 'Der Teich', '15790326316'),
   flickr('welt-4', 'Roter Meereshügel', '15634394437'),
   flickr('welt-5', 'Tal der Bäume', '15200135633'),
-  flickr('welt-6', 'Bergespfad', '15634396787'),
+  {
+    slot: 'welt-6',
+    title: 'Minecraft can look amazing',
+    author: 'Blake Patterson',
+    authorUrl: 'https://www.flickr.com/photos/blakespot/',
+    sourceUrl: 'https://www.flickr.com/photos/blakespot/30158155371/',
+    license: LICENSE,
+    licenseUrl: LICENSE_URL,
+    changes: 'oberer Bildteil ausgeschnitten, Fadenkreuz retuschiert, in WebP umgewandelt',
+  },
 ]

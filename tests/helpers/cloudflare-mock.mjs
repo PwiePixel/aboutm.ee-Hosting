@@ -3,7 +3,7 @@
 // Aufruf mit, damit ein Test prüfen kann, was das Skript wirklich getan hat.
 import http from 'node:http'
 
-export function startCloudflareMock({ token = 'test-token', zones = ['example.com'] } = {}) {
+export function startCloudflareMock({ token = 'test-token', zones = ['example.com'], accountToken = false } = {}) {
   const state = {
     calls: [],
     zones: zones.map((name, index) => ({ id: `zone${index + 1}`, name, account: { id: 'acc1', name: 'Test' } })),
@@ -21,7 +21,10 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
     const path = url.pathname
     let match
 
-    if (method === 'GET' && path === '/user/tokens/verify') return ok({ id: 'tok1', status: 'active' })
+    if (method === 'GET' && path === '/user/tokens/verify') {
+      // Konto-Tokens kennen diesen Aufruf nicht.
+      return accountToken ? fail(401, 'Invalid API Token') : ok({ id: 'tok1', status: 'active' })
+    }
 
     if (method === 'GET' && path === '/zones') {
       const name = url.searchParams.get('name')
@@ -32,7 +35,7 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
       const zone = state.zones.find((entry) => entry.id === match[1])
       if (!zone) return fail(404, 'Zone not found')
       if (method === 'GET') {
-        const name = url.searchParams.get('name')
+        const name = url.searchParams.get('name.exact') ?? url.searchParams.get('name')
         const type = url.searchParams.get('type')
         return ok(state.dns.filter((r) => r.zone === zone.id && (!name || r.name === name) && (!type || r.type === type)))
       }
@@ -60,7 +63,8 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
     if ((match = path.match(/^\/accounts\/([^/]+)\/cfd_tunnel$/))) {
       if (method === 'GET') {
         const name = url.searchParams.get('name')
-        return ok(state.tunnels.filter((t) => !t.deleted_at && (!name || t.name === name)))
+        // Bewusst großzügig (Teilstring): das Skript muss selbst genau vergleichen.
+        return ok(state.tunnels.filter((t) => !t.deleted_at && (!name || t.name.includes(name))))
       }
       if (method === 'POST') {
         if (!body.name) return fail(400, 'name is required')
@@ -69,6 +73,11 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
         state.tunnels.push(tunnel)
         return ok(tunnel)
       }
+    }
+
+    if ((match = path.match(/^\/accounts\/([^/]+)\/cfd_tunnel\/([^/]+)$/)) && method === 'GET') {
+      const tunnel = state.tunnels.find((t) => t.id === match[2])
+      return tunnel ? ok({ ...tunnel, status: 'healthy' }) : fail(404, 'Tunnel not found')
     }
 
     if ((match = path.match(/^\/accounts\/([^/]+)\/cfd_tunnel\/([^/]+)\/token$/)) && method === 'GET') {
@@ -82,6 +91,8 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
     }
 
     if ((match = path.match(/^\/accounts\/([^/]+)\/challenges\/widgets$/)) && method === 'POST') {
+      // Wie bei Cloudflare: Konto-Tokens dürfen Turnstile nicht verwalten.
+      if (accountToken) return fail(403, 'Authentication error')
       if (!body.name || !Array.isArray(body.domains) || !body.mode) return fail(400, 'name, domains and mode are required')
       const widget = { sitekey: `0x4AAA${id('key')}`, secret: `0x4BBB${id('sec')}`, ...body }
       state.widgets.push(widget)

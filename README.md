@@ -11,70 +11,108 @@ spielen. Jede Welt läuft als eigener Docker-Container; pausierte Welten belegen
   Einstellungen (Name, Spielmodus, Schwierigkeit, Whitelist, Versionswechsel, Löschen)
 - **Serverplätze und Warteschlange**: laufen schon so viele Welten wie erlaubt, wartet der nächste Start in der Schlange
 - **Auto-Pause** nach 30 Minuten ohne Spieler
-- **Admin-Bereich** (`/admin`): laufende Server live, Limit für gleichzeitige Server, alle Welten, Konten, Nachrichten
-  aus dem Hilfe-Formular, Bild-Upload
+- **Admin-Bereich** (`/admin`): laufende Server live, Limit für gleichzeitige Server, Statistik der letzten 14 Tage,
+  alle Welten, Konten, Nachrichten aus dem Hilfe-Formular, Bild-Upload
+- **Statistik**: Spielstunden, Spieler gleichzeitig, Server-Starts und erstellte Server
 - Jedes Konto sieht nur seine eigenen Welten — das wird bei jeder Abfrage auf dem Server geprüft
 
 ## Auf dem Server einrichten
 
-Du brauchst einen Linux-Server (KVM) mit [Docker](https://docs.docker.com/engine/install/) und eine Domain bei
-Cloudflare.
+Du brauchst einen Linux-Server (KVM) mit Debian oder Ubuntu und eine Domain, die bei Cloudflare liegt.
 
-### 1. DNS bei Cloudflare
-
-| Eintrag | Typ | Ziel | Proxy |
-| --- | --- | --- | --- |
-| `aboutm.ee` | A | IP deines Servers | an (orange Wolke) |
-| `*.aboutm.ee` | A | IP deines Servers | **aus** (graue Wolke, „Nur DNS“) |
-
-Der Platzhalter-Eintrag ist für die Minecraft-Adressen (`mc-xxxx.aboutm.ee`). Er muss auf „Nur DNS“ stehen, weil
-Cloudflare Minecraft-Verbindungen nicht durchleitet. Soll die Hauptdomain frei von Platzhaltern bleiben, nimm eine
-Unterdomain: `SERVER_DOMAIN=play.aboutm.ee` und dazu den Eintrag `*.play.aboutm.ee`.
-
-Unter **SSL/TLS** den Modus **Full** wählen.
-
-### 2. Firewall
-
-Offen sein müssen die Ports **80**, **443** (Website) und **25565** (Minecraft).
-
-### 3. Turnstile-Schlüssel holen
-
-Cloudflare-Dashboard → **Turnstile** → Widget hinzufügen → Domain eintragen. Du bekommst einen *Site Key* und einen
-*Secret Key*.
-
-### 4. Starten
+### Mit dem Install-Skript (empfohlen)
 
 ```bash
-git clone <dieses-repo> aboutmee && cd aboutmee
+git clone https://github.com/PwiePixel/aboutm.ee-Hosting.git aboutmee && cd aboutmee
 ```
 
 ```bash
-cp .env.example .env
+sudo ./install.sh
 ```
 
-In `.env` die Domain und die beiden Turnstile-Schlüssel eintragen, dann:
+Das Skript fragt nach der Adresse der Website, deiner E-Mail-Adresse und einem Cloudflare-API-Token. Danach macht es
+alles selbst:
+
+1. installiert Docker
+2. legt einen **Cloudflare-Tunnel** für die Website an — Port 80/443 müssen dafür nicht offen sein, und die Website
+   verrät die IP des Servers nicht
+3. setzt die DNS-Einträge: die Website über den Tunnel, `*.<Domain>` für die Minecraft-Adressen direkt auf den Server
+4. erzeugt die Turnstile-Schlüssel für die Sicherheitsprüfung
+5. öffnet Port 25565 in der Firewall (falls `ufw` aktiv ist)
+6. baut und startet alles, lädt die Minecraft-Images vor
+7. legt dein Admin-Konto an und zeigt dir einmalig das Passwort
+
+Das Skript lässt sich jederzeit erneut starten (auch zum Aktualisieren): Vorhandenes wird wiederverwendet, und
+bestehende DNS-Einträge überschreibt es nie ohne Rückfrage.
+
+**Das API-Token** legst du im Cloudflare-Dashboard an: *Mein Profil → API-Token → Token erstellen →
+Benutzerdefiniertes Token* mit diesen Berechtigungen:
+
+| Bereich | Berechtigung | Stufe |
+| --- | --- | --- |
+| Konto | Cloudflare Tunnel | Bearbeiten |
+| Konto | Turnstile | Bearbeiten |
+| Zone | DNS | Bearbeiten |
+| Zone | Zone | Lesen |
+
+Das Token wird nur während der Installation benutzt und nirgends gespeichert. Du kannst es danach wieder löschen.
+
+Ohne API-Token geht es auch: Dann fragt das Skript nach den Turnstile-Schlüsseln und optional nach einem
+Tunnel-Token, und du trägst die DNS-Einträge selbst ein.
+
+> Minecraft selbst läuft nicht durch den Tunnel — Cloudflare leitet Minecraft-Verbindungen im kostenlosen Tarif nicht
+> durch. Spieler verbinden sich direkt mit dem Server über Port 25565; die IP des Servers ist über die
+> Minecraft-Adressen also sichtbar.
+
+### Von Hand
+
+1. **DNS bei Cloudflare:** `*.aboutm.ee` als A-Eintrag auf die IP des Servers, Proxy **aus** (graue Wolke). Für die
+   Website entweder einen Tunnel einrichten (öffentlicher Hostname → `http://web:3000`) oder einen A-Eintrag mit
+   Proxy an und SSL/TLS-Modus **Full**.
+2. **Turnstile:** Cloudflare-Dashboard → Turnstile → Widget hinzufügen → Site Key und Secret Key notieren.
+3. `cp .env.example .env` und ausfüllen. `COMPOSE_PROFILES=tunnel` (mit `TUNNEL_TOKEN`) oder `COMPOSE_PROFILES=caddy`.
+4. `docker compose up -d --build`
+5. Admin-Konto anlegen:
 
 ```bash
-docker compose up -d --build
+ADMIN_PASSWORD='dein-passwort' docker compose exec -e ADMIN_PASSWORD web node scripts/make-admin.mjs deine@mail.de
 ```
 
-Beim ersten Start einer Welt lädt Docker das Minecraft-Image (ca. 1,4 GB) — das dauert einmalig ein paar Minuten.
+Gibt es das Konto schon, bekommt es nur die Admin-Rechte dazu; mit `--entfernen` am Ende nimmst du sie wieder weg.
 
-### 5. Dich selbst zum Admin machen
-
-Erst auf der Website ein Konto anlegen, dann auf dem Server:
-
-```bash
-docker compose exec web node scripts/make-admin.mjs deine@mail.de
-```
-
-Danach erscheint oben in der Leiste **Admin**. Mit `--entfernen` am Ende nimmst du die Rechte wieder weg.
-
-### 6. Vor dem Start erledigen
+### Vor dem Start erledigen
 
 - **Impressum** und **Datenschutz** ausfüllen: `app/(site)/impressum/page.tsx` und `app/(site)/datenschutz/page.tsx`.
-  Die gelb markierten Stellen sind Platzhalter.
-- **Eigene Bilder** hochladen: Admin → Bilder. Bis dahin zeigt die Seite mitgelieferte Pixel-Grafiken.
+  Die gelb markierten Stellen sind Platzhalter. Mojang verlangt außerdem, dass klar ist, wer die Seite betreibt und
+  wie man ihn erreicht — eine echte Kontaktadresse (`SUPPORT_EMAIL` in `.env`) gehört also dazu.
+
+## Bilder
+
+Die mitgelieferten Bilder in `public/art/` sind echte Minecraft-Screenshots, die ihr Urheber auf Flickr unter
+[CC BY 2.0](https://creativecommons.org/licenses/by/2.0/deed.de) veröffentlicht hat. Die Lizenz verlangt, Urheber,
+Quelle und Lizenz zu nennen — das macht die Seite `/bildnachweise` (Daten in `lib/credits.ts`).
+
+Wichtig zu wissen: Minecraft-Bilder sind **nicht** lizenzfrei. Die Rechte am Spiel liegen bei Mojang und Microsoft;
+deren [Usage Guidelines](https://www.minecraft.net/de-de/usage-guidelines) erlauben Screenshots unter Bedingungen,
+unter anderem dem Hinweis „Not an official Minecraft service …“, der hier auf jeder Seite steht. Am saubersten sind
+Screenshots, die du selbst aufgenommen hast: Unter **Admin → Bilder** lädst du sie hoch, sie ersetzen die
+mitgelieferten sofort, und deren Eintrag verschwindet aus den Bildnachweisen.
+
+## Statistik
+
+Gezählt wird laufend und automatisch — als Gesamtwert und je Tag:
+
+| Zahl | Bedeutung |
+| --- | --- |
+| Server erstellt | jede angelegte Welt |
+| Server-Starts | jeder Start, der online ankommt (auch Neustarts) |
+| Spielstunden | Zeit, in der Spieler verbunden waren — zwei Spieler eine Stunde lang sind zwei Stunden |
+| Spieler gleichzeitig | Höchstwert über alle Welten, mit Datum des Rekords |
+| Server gleichzeitig | Höchstwert gleichzeitig laufender Welten |
+| Verschiedene Spieler | jeder Minecraft-Name einmal — gespeichert nur als nicht umkehrbarer Fingerabdruck |
+
+Zu sehen auf der Startseite, unter `/zahlen`, im Admin-Bereich (mit den letzten 14 Tagen) und je Welt in der
+Übersicht. Die Spielerzahl fragt die Website alle zehn Sekunden bei jedem laufenden Server ab.
 
 ## Die Cloudflare-Prüfung „Bestätigen Sie, dass Sie ein Mensch sind“
 
@@ -90,7 +128,7 @@ Es gibt zwei Ebenen:
 
 | Aufgabe | Befehl |
 | --- | --- |
-| Aktualisieren | `git pull && docker compose up -d --build` |
+| Aktualisieren | `git pull && sudo ./install.sh` |
 | Logs der Website | `docker compose logs -f web` |
 | Laufende Welten | `docker ps --filter label=aboutmee.world` |
 | Stoppen | `docker compose down` (laufende Welten vorher im Admin-Bereich pausieren) |
@@ -127,7 +165,8 @@ npm run dev
 ```
 
 Ohne weitere Einstellungen läuft der **Vorschau-Modus**: Welten lassen sich anlegen und bedienen, es startet aber
-kein echter Minecraft-Server. Mit `RUNTIME_DRIVER=docker npm run dev` werden echte Container gestartet (Docker muss
+kein echter Minecraft-Server. In der Konsole einer laufenden Vorschau-Welt simulieren `testjoin Steve` und
+`testleave Steve` einen Spieler — praktisch, um Statistik und Auto-Pause auszuprobieren. Mit `RUNTIME_DRIVER=docker npm run dev` werden echte Container gestartet (Docker muss
 laufen).
 
 ```bash

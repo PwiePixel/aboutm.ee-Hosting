@@ -92,6 +92,8 @@ env_value() { # env_value <Datei> <Schlüssel>
 # ─────────────────────────── Cloudflare-API ───────────────────────────
 
 CF_HEADERS=''
+ZONE_STATUS=''
+TUNNEL_STATUS_PATH=''
 
 # Ruft die Cloudflare-API auf und gibt die Antwort aus. Bricht mit der Meldung von Cloudflare ab,
 # wenn der Aufruf scheitert. Das Token steht nur in einer Datei, nie in der Prozessliste.
@@ -106,6 +108,16 @@ cf() { # cf <METHODE> <Pfad> [JSON-Daten]
   printf '%s' "$response"
 }
 
+# Wie cf, aber ohne Abbruch: gibt bei einem Fehler nur einen Status ungleich 0 zurück.
+cf_try() { # cf_try <METHODE> <Pfad> [JSON-Daten]
+  local response
+  local -a args=(--silent --max-time 30 --request "$1" --header "@$CF_HEADERS")
+  [[ -n "${3:-}" ]] && args+=(--header 'Content-Type: application/json' --data "$3")
+  response="$(curl "${args[@]}" "$CF_API$2")" || return 1
+  [[ "$(jq -r '.success // false' <<<"$response" 2>/dev/null)" == true ]] || return 1
+  printf '%s' "$response"
+}
+
 # Findet die Zone zu einer Adresse: erst die Adresse selbst, dann Stück für Stück die übergeordnete Domain.
 cf_find_zone() { # cf_find_zone <Adresse>  → setzt ZONE_ID, ZONE_NAME, ACCOUNT_ID
   local candidate="$1" response
@@ -115,6 +127,7 @@ cf_find_zone() { # cf_find_zone <Adresse>  → setzt ZONE_ID, ZONE_NAME, ACCOUNT
       ZONE_ID="$(jq -r '.result[0].id' <<<"$response")"
       ZONE_NAME="$(jq -r '.result[0].name' <<<"$response")"
       ACCOUNT_ID="$(jq -r '.result[0].account.id' <<<"$response")"
+      ZONE_STATUS="$(jq -r '.result[0].status // "active"' <<<"$response")"
       return 0
     fi
     candidate="${candidate#*.}"
@@ -128,7 +141,8 @@ cf_dns_upsert() { # cf_dns_upsert <Typ> <Name> <Ziel> <proxied true|false> <Zone
   body="$(jq -n --arg type "$type" --arg name "$name" --arg content "$content" --argjson proxied "$proxied" \
     '{type: $type, name: $name, content: $content, proxied: $proxied, ttl: 1, comment: "aboutm.ee Hosting"}')"
   # Ein Name kann nur entweder A/AAAA- oder CNAME-Einträge haben — deshalb alle drei Arten prüfen.
-  existing="$(cf GET "/zones/$zone/dns_records?name=$name&per_page=100")"
+  # Der Name wird kodiert übergeben — Platzhalter-Einträge enthalten ein "*".
+  existing="$(cf GET "/zones/$zone/dns_records?name.exact=$(jq -rn --arg value "$name" '$value | @uri')&per_page=100")"
   existing="$(jq -c '[.result[] | select(.type == "A" or .type == "AAAA" or .type == "CNAME")]' <<<"$existing")"
 
   if [[ "$(jq 'length' <<<"$existing")" -eq 0 ]]; then
@@ -164,18 +178,28 @@ cloudflare_setup() {
   local response tunnel_id widget
   step "Cloudflare einrichten"
 
-  response="$(cf GET '/user/tokens/verify')"
-  [[ "$(jq -r '.result.status' <<<"$response")" == active ]] || die "Das API-Token ist nicht aktiv."
-  ok "API-Token ist gültig"
+  # Persönliche Tokens lassen sich so vorab prüfen. Konto-Tokens kennen diesen Aufruf nicht —
+  # bei ihnen zeigt erst die Suche nach der Domain, ob das Token taugt.
+  if response="$(cf_try GET '/user/tokens/verify')"; then
+    [[ "$(jq -r '.result.status' <<<"$response")" == active ]] || die "Das API-Token ist nicht aktiv."
+    ok "API-Token ist gültig"
+  fi
 
-  cf_find_zone "$SITE_DOMAIN" || die "Zu $SITE_DOMAIN gibt es in diesem Cloudflare-Konto keine Domain. Die Domain muss bei Cloudflare liegen und das Token muss sie lesen dürfen."
+  cf_find_zone "$SITE_DOMAIN" || die "Zu $SITE_DOMAIN gibt es in diesem Cloudflare-Konto keine Domain. Die Domain muss bei Cloudflare liegen und das Token muss sie lesen dürfen (Zone · Zone · Lesen)."
   ok "Domain gefunden: $ZONE_NAME"
-  local site_zone="$ZONE_ID"
+  [[ "$ZONE_STATUS" == active ]] || warn "Die Domain ist bei Cloudflare noch nicht aktiv (Status: $ZONE_STATUS). Solange die Nameserver nicht umgestellt sind, ist die Website nicht erreichbar."
+  local site_zone="$ZONE_ID" below_zone="${SITE_DOMAIN%"$ZONE_NAME"}"
+  below_zone="${below_zone%.}"
+  if [[ "$below_zone" == *.* ]]; then
+    warn "$SITE_DOMAIN liegt zwei Ebenen unter $ZONE_NAME. Dafür stellt Cloudflare kein kostenloses Zertifikat aus —"
+    warn "nimm lieber eine Adresse direkt unter der Domain (z. B. hosting.$ZONE_NAME)."
+  fi
 
   # ── Tunnel für die Website ──
   if [[ "$MODE" == tunnel ]]; then
     response="$(cf GET "/accounts/$ACCOUNT_ID/cfd_tunnel?name=$TUNNEL_NAME&is_deleted=false")"
-    tunnel_id="$(jq -r '.result[0].id // empty' <<<"$response")"
+    # Der Namensfilter der API kann auch ähnliche Namen liefern — deshalb hier genau vergleichen.
+    tunnel_id="$(jq -r --arg name "$TUNNEL_NAME" '[.result[] | select(.name == $name and .deleted_at == null)][0].id // empty' <<<"$response")"
     if [[ -z "$tunnel_id" ]]; then
       response="$(cf POST "/accounts/$ACCOUNT_ID/cfd_tunnel" "$(jq -n --arg name "$TUNNEL_NAME" '{name: $name, config_src: "cloudflare"}')")"
       tunnel_id="$(jq -r '.result.id' <<<"$response")"
@@ -183,6 +207,7 @@ cloudflare_setup() {
     else
       ok "Tunnel '$TUNNEL_NAME' gibt es schon — wird weiterverwendet"
     fi
+    # Ersetzt die gesamte Weiterleitung dieses Tunnels — er gehört allein dieser Installation.
     cf PUT "/accounts/$ACCOUNT_ID/cfd_tunnel/$tunnel_id/configurations" "$(jq -n --arg host "$SITE_DOMAIN" \
       '{config: {ingress: [{hostname: $host, service: "http://web:3000"}, {service: "http_status:404"}]}}')" >/dev/null
     ok "Tunnel leitet $SITE_DOMAIN an die Website"
@@ -190,6 +215,7 @@ cloudflare_setup() {
     TUNNEL_TOKEN="$(jq -r '.result' <<<"$response")"
     [[ -n "$TUNNEL_TOKEN" && "$TUNNEL_TOKEN" != null ]] || die "Cloudflare hat kein Tunnel-Token geliefert."
     cf_dns_upsert CNAME "$SITE_DOMAIN" "$tunnel_id.cfargotunnel.com" true "$site_zone"
+    TUNNEL_STATUS_PATH="/accounts/$ACCOUNT_ID/cfd_tunnel/$tunnel_id"
   else
     cf_dns_upsert A "$SITE_DOMAIN" "$PUBLIC_IP" true "$site_zone"
   fi
@@ -202,13 +228,23 @@ cloudflare_setup() {
   if [[ -n "$TURNSTILE_SITE_KEY" && -n "$TURNSTILE_SECRET_KEY" ]]; then
     ok "Turnstile-Schlüssel aus der vorhandenen .env werden weiterverwendet"
   else
-    widget="$(cf POST "/accounts/$ACCOUNT_ID/challenges/widgets" "$(jq -n --arg name "$WIDGET_NAME" --arg domain "$SITE_DOMAIN" \
-      '{name: $name, domains: [$domain], mode: "managed"}')")"
-    TURNSTILE_SITE_KEY="$(jq -r '.result.sitekey' <<<"$widget")"
-    TURNSTILE_SECRET_KEY="$(jq -r '.result.secret' <<<"$widget")"
-    [[ -n "$TURNSTILE_SITE_KEY" && "$TURNSTILE_SITE_KEY" != null && -n "$TURNSTILE_SECRET_KEY" && "$TURNSTILE_SECRET_KEY" != null ]] ||
-      die "Cloudflare hat keine Turnstile-Schlüssel geliefert."
-    ok "Turnstile-Widget angelegt"
+    # Turnstile lässt sich nur mit einem persönlichen Token anlegen (nicht mit einem Konto-Token) und
+    # braucht die Berechtigung Konto · Turnstile · Bearbeiten. Klappt es nicht, wird nach den Schlüsseln gefragt.
+    if widget="$(cf_try POST "/accounts/$ACCOUNT_ID/challenges/widgets" "$(jq -n --arg name "$WIDGET_NAME" --arg domain "$SITE_DOMAIN" \
+      '{name: $name, domains: [$domain], mode: "managed"}')")"; then
+      TURNSTILE_SITE_KEY="$(jq -r '.result.sitekey // empty' <<<"$widget")"
+      TURNSTILE_SECRET_KEY="$(jq -r '.result.secret // empty' <<<"$widget")"
+    fi
+    if [[ -n "$TURNSTILE_SITE_KEY" && -n "$TURNSTILE_SECRET_KEY" ]]; then
+      ok "Turnstile-Widget angelegt"
+    else
+      TURNSTILE_SITE_KEY='' TURNSTILE_SECRET_KEY=''
+      warn "Das Turnstile-Widget ließ sich mit diesem Token nicht anlegen (fehlt die Berechtigung Konto · Turnstile · Bearbeiten?)."
+      note "Lege es von Hand an: Cloudflare-Dashboard → Turnstile → Widget hinzufügen → Domain $SITE_DOMAIN."
+      ask TURNSTILE_SITE_KEY "Turnstile Site Key" ''
+      ask_secret TURNSTILE_SECRET_KEY "Turnstile Secret Key"
+      [[ -n "$TURNSTILE_SITE_KEY" && -n "$TURNSTILE_SECRET_KEY" ]] || die "Ohne Turnstile-Schlüssel gäbe es keine Sicherheitsprüfung."
+    fi
   fi
 }
 
@@ -409,6 +445,23 @@ EOF
     sleep 3
   done
   ok "Website läuft"
+
+  if [[ -n "$TUNNEL_STATUS_PATH" ]]; then
+    local tunnel_state='' tunnel_waited=0 tunnel_response
+    while ((tunnel_waited < 60)); do
+      if tunnel_response="$(cf_try GET "$TUNNEL_STATUS_PATH")"; then
+        tunnel_state="$(jq -r '.result.status // empty' <<<"$tunnel_response")"
+        [[ "$tunnel_state" == healthy ]] && break
+      fi
+      tunnel_waited=$((tunnel_waited + 5))
+      sleep 5
+    done
+    if [[ "$tunnel_state" == healthy ]]; then
+      ok "Tunnel ist verbunden — https://$SITE_DOMAIN ist erreichbar"
+    else
+      warn "Der Tunnel meldet noch keine Verbindung (Status: ${tunnel_state:-unbekannt}). Der Server muss Cloudflare ausgehend auf Port 7844 erreichen. Logs: docker compose logs tunnel"
+    fi
+  fi
 
   step "Minecraft-Images vorab laden (damit der erste Start einer Welt schnell geht)"
   local image

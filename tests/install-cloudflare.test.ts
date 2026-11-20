@@ -153,6 +153,43 @@ describe('install.sh — Cloudflare einrichten', () => {
     expect(mock.state.dns).toHaveLength(0)
   })
 
+  it('verwechselt den Tunnel nicht mit einem ähnlich benannten', async () => {
+    await fetch(`${mock.url}/accounts/acc1/cfd_tunnel`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'aboutmee-alt', config_src: 'cloudflare' }),
+    })
+    const run = await runCloudflareSetup(mock, BASE)
+    expect(run.code, run.stderr).toBe(0)
+    expect(mock.state.tunnels.map((t) => t.name).sort()).toEqual(['aboutmee', 'aboutmee-alt'])
+    const own = mock.state.tunnels.find((t) => t.name === 'aboutmee')!
+    const other = mock.state.tunnels.find((t) => t.name === 'aboutmee-alt')!
+    expect(mock.state.tunnelConfigs[own.id]).toBeDefined()
+    expect(mock.state.tunnelConfigs[other.id]).toBeUndefined() // der fremde Tunnel bleibt unangetastet
+  })
+
+  it('kommt auch mit einem Konto-Token zurecht, das sich nicht vorab prüfen lässt', async () => {
+    await mock.close()
+    mock = await startCloudflareMock({ zones: ['example.com'], accountToken: true })
+    // Turnstile geht mit Konto-Tokens nicht — mit bereits vorhandenen Schlüsseln läuft trotzdem alles durch …
+    const withKeys = await runCloudflareSetup(mock, { ...BASE, TURNSTILE_SITE_KEY: 'vorhanden', TURNSTILE_SECRET_KEY: 'geheim' })
+    expect(withKeys.code, withKeys.stderr).toBe(0)
+    expect(mock.state.tunnels).toHaveLength(1)
+    expect(withKeys.result).toMatchObject({ site: 'vorhanden', secret: 'geheim' })
+
+    // … und ohne Schlüssel fragt das Skript danach, statt mittendrin kommentarlos abzubrechen.
+    const withoutKeys = await runCloudflareSetup(mock, BASE)
+    expect(withoutKeys.code).not.toBe(0)
+    expect(withoutKeys.stderr).toContain('Turnstile')
+    expect(mock.state.widgets).toHaveLength(0)
+  })
+
+  it('findet bestehende Platzhalter-Einträge (Name mit Stern) wieder', async () => {
+    await runCloudflareSetup(mock, BASE)
+    const lookups = mock.state.calls.filter((call) => call.method === 'GET' && call.path.endsWith('/dns_records'))
+    expect(lookups.some((call) => call.query.includes('name.exact=%2A.example.com'))).toBe(true)
+  })
+
   it('zeigt das Token nie in der Prozessliste', async () => {
     await runCloudflareSetup(mock, BASE)
     // Jeder Aufruf kam mit dem Token an — übergeben wurde es aber nur per Datei.

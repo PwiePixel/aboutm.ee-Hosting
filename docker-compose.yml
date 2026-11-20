@@ -1,0 +1,58 @@
+# Alles, was auf dem Server läuft:
+#   web    – die Website mit Verwaltung; startet die Minecraft-Container
+#   router – nimmt Minecraft-Verbindungen auf Port 25565 an und leitet sie
+#            anhand der Adresse (mc-xxxx.<SERVER_DOMAIN>) an die richtige Welt
+#   caddy  – HTTPS für die Website
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      RUNTIME_DRIVER: docker
+      # Derselbe Pfad innen und außen — die Minecraft-Container hängen ihn vom Host ein.
+      DATA_DIR: ${DATA_PATH:-/srv/aboutmee/data}
+      HOST_DATA_DIR: ${DATA_PATH:-/srv/aboutmee/data}
+      MC_NETWORK: aboutmee-mc
+    volumes:
+      - ${DATA_PATH:-/srv/aboutmee/data}:${DATA_PATH:-/srv/aboutmee/data}
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [web]
+
+  router:
+    image: itzg/mc-router:latest
+    restart: unless-stopped
+    # Braucht Lesezugriff auf den Docker-Socket, um laufende Welten zu finden.
+    user: "0:0"
+    environment:
+      IN_DOCKER: "true"
+      DOCKER_NETWORK: aboutmee-mc
+      CONNECTION_RATE_LIMIT: "20"
+    ports:
+      - "25565:25565"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [mc]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:?SITE_DOMAIN in .env eintragen, z. B. aboutm.ee}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [web]
+
+networks:
+  web:
+  mc:
+    name: aboutmee-mc
+
+volumes:
+  caddy_data:
+  caddy_config:

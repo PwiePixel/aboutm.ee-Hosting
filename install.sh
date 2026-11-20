@@ -34,12 +34,16 @@ ok() { printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
 note() { printf '  %s%s%s\n' "$DIM" "$*" "$RESET"; }
 warn() { printf '  %s! %s%s\n' "$YELLOW" "$*" "$RESET" >&2; }
 die() {
+  trap - ERR # die eigene Meldung reicht — nicht noch „Abgebrochen in Zeile …“ hinterher
   printf '\n%s✗ %s%s\n' "$RED" "$*" "$RESET" >&2
   exit 1
 }
 
 WORK_DIR=''
-cleanup() { [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]] && rm -rf -- "$WORK_DIR"; }
+cleanup() {
+  trap - ERR
+  if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then rm -rf -- "$WORK_DIR"; fi
+}
 trap cleanup EXIT
 trap 'die "Abgebrochen in Zeile $LINENO. Du kannst das Skript einfach noch einmal starten."' ERR
 
@@ -84,9 +88,33 @@ is_domain() { [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$ ]]; 
 is_email() { [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]{2,}$ ]]; }
 
 # Liest einen Wert aus einer vorhandenen .env, damit ein zweiter Lauf nichts überschreibt.
+# Verträgt auch von Hand geschriebene Zeilen: KEY="wert", KEY='wert' und KEY=wert   # Kommentar
 env_value() { # env_value <Datei> <Schlüssel>
   [[ -f "$1" ]] || return 0
-  sed -n "s/^$2=//p" "$1" | tail -n 1
+  local value
+  value="$(sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*//p" "$1" | tail -n 1)"
+  value="${value%$'\r'}"
+  if [[ "$value" =~ ^\"([^\"]*)\" || "$value" =~ ^\'([^\']*)\' ]]; then
+    value="${BASH_REMATCH[1]}"
+  else
+    value="${value%%[[:space:]]#*}"
+    value="${value%"${value##*[![:space:]]}"}"
+  fi
+  printf '%s' "$value"
+}
+
+# Schlüssel, die dieses Skript in der .env selbst verwaltet. Alles andere bleibt unangetastet erhalten.
+MANAGED_KEYS='SITE_DOMAIN SITE_URL SERVER_DOMAIN COMPOSE_PROFILES TUNNEL_TOKEN CLIENT_IP_HEADER TURNSTILE_SITE_KEY TURNSTILE_SECRET_KEY DATA_PATH TOTAL_SLOTS AUTO_PAUSE_MINUTES MC_CPUS SUPPORT_EMAIL'
+
+# Gibt alle Einstellungen einer .env aus, die dieses Skript nicht selbst verwaltet (z. B. Statistik-Schlüssel).
+env_extras() { # env_extras <Datei>
+  [[ -f "$1" ]] || return 0
+  awk -v managed="$MANAGED_KEYS" '
+    BEGIN { n = split(managed, list, " "); for (i = 1; i <= n; i++) skip[list[i]] = 1 }
+    /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/ {
+      key = $0; sub(/^[[:space:]]*/, "", key); sub(/[[:space:]]*=.*/, "", key)
+      if (!(key in skip)) print
+    }' "$1"
 }
 
 # ─────────────────────────── Cloudflare-API ───────────────────────────
@@ -119,10 +147,13 @@ cf_try() { # cf_try <METHODE> <Pfad> [JSON-Daten]
 }
 
 # Findet die Zone zu einer Adresse: erst die Adresse selbst, dann Stück für Stück die übergeordnete Domain.
+# Gibt es keine, bleibt ZONE_ID leer. Scheitert der Aufruf selbst (Token, Netz), endet das Skript mit
+# der Meldung von Cloudflare — ausdrücklich, denn in einer Bedingung griffe „set -e“ hier nicht.
 cf_find_zone() { # cf_find_zone <Adresse>  → setzt ZONE_ID, ZONE_NAME, ACCOUNT_ID
   local candidate="$1" response
+  ZONE_ID=''
   while [[ "$candidate" == *.* ]]; do
-    response="$(cf GET "/zones?name=$candidate")"
+    response="$(cf GET "/zones?name=$candidate")" || exit 1
     if [[ "$(jq -r '.result | length' <<<"$response")" -gt 0 ]]; then
       ZONE_ID="$(jq -r '.result[0].id' <<<"$response")"
       ZONE_NAME="$(jq -r '.result[0].name' <<<"$response")"
@@ -132,7 +163,7 @@ cf_find_zone() { # cf_find_zone <Adresse>  → setzt ZONE_ID, ZONE_NAME, ACCOUNT
     fi
     candidate="${candidate#*.}"
   done
-  return 1
+  return 0
 }
 
 # Legt einen DNS-Eintrag an oder aktualisiert ihn. Fragt nach, bevor ein fremder Eintrag ersetzt wird.
@@ -185,7 +216,8 @@ cloudflare_setup() {
     ok "API-Token ist gültig"
   fi
 
-  cf_find_zone "$SITE_DOMAIN" || die "Zu $SITE_DOMAIN gibt es in diesem Cloudflare-Konto keine Domain. Die Domain muss bei Cloudflare liegen und das Token muss sie lesen dürfen (Zone · Zone · Lesen)."
+  cf_find_zone "$SITE_DOMAIN"
+  [[ -n "$ZONE_ID" ]] || die "Zu $SITE_DOMAIN gibt es in diesem Cloudflare-Konto keine Domain. Die Domain muss bei Cloudflare liegen und das Token muss sie lesen dürfen (Zone · Zone · Lesen)."
   ok "Domain gefunden: $ZONE_NAME"
   [[ "$ZONE_STATUS" == active ]] || warn "Die Domain ist bei Cloudflare noch nicht aktiv (Status: $ZONE_STATUS). Solange die Nameserver nicht umgestellt sind, ist die Website nicht erreichbar."
   local site_zone="$ZONE_ID" below_zone="${SITE_DOMAIN%"$ZONE_NAME"}"
@@ -207,7 +239,17 @@ cloudflare_setup() {
     else
       ok "Tunnel '$TUNNEL_NAME' gibt es schon — wird weiterverwendet"
     fi
-    # Ersetzt die gesamte Weiterleitung dieses Tunnels — er gehört allein dieser Installation.
+    # Der Aufruf ersetzt die gesamte Weiterleitung des Tunnels. Leitet er schon andere Adressen weiter,
+    # gehört er vielleicht zu etwas anderem — dann erst fragen.
+    local other_hosts=''
+    if response="$(cf_try GET "/accounts/$ACCOUNT_ID/cfd_tunnel/$tunnel_id/configurations")"; then
+      other_hosts="$(jq -r --arg host "$SITE_DOMAIN" '[.result.config.ingress[]?.hostname // empty | select(. != $host)] | unique | join(", ")' <<<"$response")"
+    fi
+    if [[ -n "$other_hosts" ]]; then
+      warn "Der Tunnel '$TUNNEL_NAME' leitet bisher auch weiter: $other_hosts"
+      confirm "Diese Weiterleitungen entfernen und den Tunnel nur noch für $SITE_DOMAIN verwenden?" ||
+        die "Tunnel nicht geändert. Mit AM_TUNNEL_NAME=<anderer-name> legt das Skript einen eigenen Tunnel an."
+    fi
     cf PUT "/accounts/$ACCOUNT_ID/cfd_tunnel/$tunnel_id/configurations" "$(jq -n --arg host "$SITE_DOMAIN" \
       '{config: {ingress: [{hostname: $host, service: "http://web:3000"}, {service: "http_status:404"}]}}')" >/dev/null
     ok "Tunnel leitet $SITE_DOMAIN an die Website"
@@ -221,12 +263,27 @@ cloudflare_setup() {
   fi
 
   # ── Minecraft-Adressen: direkt auf den Server, ohne Cloudflare-Proxy ──
-  cf_find_zone "$SERVER_DOMAIN" || die "Zu $SERVER_DOMAIN gibt es in diesem Cloudflare-Konto keine Domain."
+  cf_find_zone "$SERVER_DOMAIN"
+  [[ -n "$ZONE_ID" ]] || die "Zu $SERVER_DOMAIN gibt es in diesem Cloudflare-Konto keine Domain."
   cf_dns_upsert A "*.$SERVER_DOMAIN" "$PUBLIC_IP" false "$ZONE_ID"
 
   # ── Turnstile ──
   if [[ -n "$TURNSTILE_SITE_KEY" && -n "$TURNSTILE_SECRET_KEY" ]]; then
     ok "Turnstile-Schlüssel aus der vorhandenen .env werden weiterverwendet"
+    # Ein Widget gilt nur für die Adressen, die bei ihm eingetragen sind. Hat sich die Adresse der
+    # Website geändert, muss sie dazu — sonst lehnt Turnstile dort jede Prüfung ab.
+    if widget="$(cf_try GET "/accounts/$ACCOUNT_ID/challenges/widgets/$TURNSTILE_SITE_KEY")"; then
+      if [[ "$(jq -r --arg host "$SITE_DOMAIN" '[.result.domains[]? | select(. == $host)] | length' <<<"$widget")" -eq 0 ]]; then
+        if cf_try PUT "/accounts/$ACCOUNT_ID/challenges/widgets/$TURNSTILE_SITE_KEY" "$(jq -c --arg host "$SITE_DOMAIN" \
+          '{name: .result.name, mode: .result.mode, domains: ((.result.domains // []) + [$host])}' <<<"$widget")" >/dev/null; then
+          ok "Turnstile-Widget um $SITE_DOMAIN ergänzt"
+        else
+          warn "Das Turnstile-Widget gilt noch nicht für $SITE_DOMAIN. Trage die Adresse im Cloudflare-Dashboard unter Turnstile beim Widget ein."
+        fi
+      fi
+    else
+      note "Das Widget ließ sich nicht prüfen. Achte darauf, dass $SITE_DOMAIN bei ihm eingetragen ist."
+    fi
   else
     # Turnstile lässt sich nur mit einem persönlichen Token anlegen (nicht mit einem Konto-Token) und
     # braucht die Berechtigung Konto · Turnstile · Bearbeiten. Klappt es nicht, wird nach den Schlüsseln gefragt.
@@ -283,9 +340,13 @@ main() {
 
   # ── 2. Programmdateien ──
   step "Programmdateien"
-  local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
-  if [[ -n "$script_dir" && -f "$script_dir/docker-compose.yml" && -f "$script_dir/Dockerfile" ]]; then
+  # Nur wenn das Skript als Datei aus seinem eigenen Ordner gestartet wurde, ist das die Installation.
+  # Kommt es per Pipe (curl … | bash), sagt der aktuelle Ordner nichts — er könnte ein fremdes Projekt sein.
+  local script_dir='' script_file="${BASH_SOURCE[0]:-}"
+  if [[ -n "$script_file" && -f "$script_file" ]]; then
+    script_dir="$(cd "$(dirname "$script_file")" 2>/dev/null && pwd || true)"
+  fi
+  if [[ -n "$script_dir" && -f "$script_dir/docker-compose.yml" && -f "$script_dir/scripts/make-admin.mjs" ]]; then
     INSTALL_DIR="$script_dir"
     ok "Verwende die Dateien in $INSTALL_DIR"
   elif [[ -d "$INSTALL_DIR/.git" ]]; then
@@ -354,8 +415,14 @@ main() {
 
   # ── 5. Cloudflare ──
   if [[ -n "$cf_token" ]]; then
+    # Lief die Website bisher direkt über diesen Server, nicht stillschweigend dabei bleiben:
+    # Mit dem API-Token kann das Skript jetzt den Tunnel einrichten.
+    if [[ -z "${AM_MODE:-}" && "$MODE" == caddy ]] &&
+      confirm "Bisher läuft die Website direkt über diesen Server (Caddy). Auf den Cloudflare-Tunnel umstellen?"; then
+      MODE=tunnel
+    fi
     MODE="${MODE:-tunnel}"
-    [[ "$MODE" == tunnel || "$MODE" == caddy ]] || die "AM_MODE muss tunnel oder caddy sein."
+    [[ "$MODE" == tunnel || "$MODE" == caddy ]] || die "Die Betriebsart muss tunnel oder caddy sein (AM_MODE oder COMPOSE_PROFILES in .env)."
     CF_HEADERS="$WORK_DIR/cf-headers"
     (umask 077 && printf 'Authorization: Bearer %s\n' "$cf_token" >"$CF_HEADERS")
     cloudflare_setup
@@ -375,8 +442,12 @@ main() {
       fi
       if [[ -n "$TUNNEL_TOKEN" ]]; then MODE=tunnel; else MODE=caddy; fi
     fi
-    [[ "$MODE" == tunnel || "$MODE" == caddy ]] || die "AM_MODE muss tunnel oder caddy sein."
-    [[ "$MODE" == caddy || -n "$TUNNEL_TOKEN" ]] || die "Für AM_MODE=tunnel fehlt das Tunnel-Token."
+    [[ "$MODE" == tunnel || "$MODE" == caddy ]] || die "Die Betriebsart muss tunnel oder caddy sein (AM_MODE oder COMPOSE_PROFILES in .env)."
+    if [[ "$MODE" == tunnel && -z "$TUNNEL_TOKEN" ]]; then
+      note "Für den Tunnel fehlt das Token: Zero Trust → Netzwerke → Tunnel → deinen Tunnel öffnen → Token kopieren."
+      ask_secret TUNNEL_TOKEN "Tunnel-Token"
+      [[ -n "$TUNNEL_TOKEN" ]] || die "Ohne Tunnel-Token geht die Betriebsart tunnel nicht. Mit AM_MODE=caddy läuft die Website direkt über diesen Server."
+    fi
     warn "DNS bitte selbst eintragen:  *.$SERVER_DOMAIN  →  A  $PUBLIC_IP  (nur DNS, graue Wolke)"
     [[ "$MODE" == caddy ]] && warn "und:  $SITE_DOMAIN  →  A  $PUBLIC_IP"
   fi
@@ -389,14 +460,18 @@ main() {
   auto_pause="$(env_value "$env_file" AUTO_PAUSE_MINUTES)"
   mc_cpus="$(env_value "$env_file" MC_CPUS)"
   support_email="$(env_value "$env_file" SUPPORT_EMAIL)"
+  local extras=''
   if [[ -f "$env_file" ]]; then
+    extras="$(env_extras "$env_file")"
     cp -p "$env_file" "$env_file.bak"
     chmod 600 "$env_file.bak" # enthält dieselben Geheimnisse wie die .env
   fi
+  local ip_header=cf-connecting-ip
+  [[ "$MODE" == caddy ]] && ip_header=x-real-ip
   (
     umask 077
     cat >"$env_file" <<EOF
-# Von install.sh geschrieben. Erneutes Ausführen von install.sh behält diese Werte bei.
+# Von install.sh geschrieben. Erneutes Ausführen behält diese Werte und alle eigenen Zeilen bei.
 SITE_DOMAIN=$SITE_DOMAIN
 SITE_URL=https://$SITE_DOMAIN
 SERVER_DOMAIN=$SERVER_DOMAIN
@@ -404,6 +479,8 @@ SERVER_DOMAIN=$SERVER_DOMAIN
 # tunnel = Website über Cloudflare-Tunnel, caddy = HTTPS direkt über diesen Server
 COMPOSE_PROFILES=$MODE
 TUNNEL_TOKEN=$TUNNEL_TOKEN
+# Kopfzeile mit der Adresse des Besuchers — gesetzt vom Tunnel bzw. von Caddy
+CLIENT_IP_HEADER=$ip_header
 
 TURNSTILE_SITE_KEY=$TURNSTILE_SITE_KEY
 TURNSTILE_SECRET_KEY=$TURNSTILE_SECRET_KEY
@@ -414,6 +491,9 @@ AUTO_PAUSE_MINUTES=${auto_pause:-30}
 MC_CPUS=${mc_cpus:-2}
 SUPPORT_EMAIL=${support_email:-}
 EOF
+    if [[ -n "$extras" ]]; then
+      printf '\n# Weitere Einstellungen — aus der bisherigen .env übernommen\n%s\n' "$extras" >>"$env_file"
+    fi
   )
   chmod 600 "$env_file"
   ok ".env geschrieben (nur für root lesbar)"
@@ -440,14 +520,42 @@ EOF
   else
     docker compose --profile tunnel rm --stop --force tunnel >/dev/null 2>&1 || true
   fi
-  docker compose up -d --build --remove-orphans
+  # Erst nur die Website und den Minecraft-Router starten — noch ohne Tunnel oder Caddy. So ist die
+  # Seite von außen nicht erreichbar, bis das Admin-Konto steht, und niemand kann sich vorher unter
+  # deiner Adresse registrieren.
+  docker compose up -d --build web router
   local waited=0
   until docker compose exec -T web node -e "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; do
     waited=$((waited + 3))
     ((waited < 180)) || die "Die Website antwortet nicht. Logs ansehen: docker compose logs web"
     sleep 3
   done
-  ok "Website läuft"
+  ok "Website läuft (noch nicht öffentlich)"
+
+  # ── 9. Admin-Konto ──
+  step "Admin-Konto"
+  local admin_password="${AM_ADMIN_PASSWORD:-}" generated=0 admin_output admin_state
+  admin_state="$(docker compose exec -T web node scripts/make-admin.mjs "$ADMIN_EMAIL" --status)" ||
+    die "Der Stand des Admin-Kontos ließ sich nicht abfragen."
+  if [[ "$admin_state" == konto ]]; then
+    # Ein gewöhnliches Konto mit dieser Adresse gibt es schon. Adressen werden bei der Registrierung nicht
+    # bestätigt — es könnte also auch jemand anderes angelegt haben.
+    warn "Unter $ADMIN_EMAIL gibt es schon ein Konto ohne Admin-Rechte."
+    confirm "Ist das dein Konto? Dann bekommt es jetzt Admin-Rechte (das Passwort bleibt, wie es ist)." ||
+      die "Admin-Rechte nicht vergeben. Starte das Skript mit einer anderen E-Mail-Adresse, oder lösche das Konto zuerst."
+  fi
+  if [[ -z "$admin_password" ]]; then
+    admin_password="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)"
+    generated=1
+  fi
+  admin_output="$(ADMIN_PASSWORD="$admin_password" docker compose exec -T -e ADMIN_PASSWORD web node scripts/make-admin.mjs "$ADMIN_EMAIL")" ||
+    die "Das Admin-Konto ließ sich nicht anlegen."
+  ok "$admin_output"
+
+  # ── 10. Öffentlich schalten ──
+  step "Website öffentlich schalten"
+  docker compose up -d --remove-orphans
+  ok "$([[ "$MODE" == tunnel ]] && printf 'Cloudflare-Tunnel gestartet' || printf 'Caddy gestartet (HTTPS-Zertifikat wird beim ersten Aufruf geholt)')"
 
   if [[ -n "$TUNNEL_STATUS_PATH" ]]; then
     local tunnel_state='' tunnel_waited=0 tunnel_response
@@ -471,17 +579,6 @@ EOF
   for image in itzg/minecraft-server:java25 itzg/minecraft-server:java21; do
     if docker pull --quiet "$image" >/dev/null; then ok "$image"; else warn "$image ließ sich nicht laden — wird beim ersten Start nachgeholt."; fi
   done
-
-  # ── 9. Admin-Konto ──
-  step "Admin-Konto"
-  local admin_password="${AM_ADMIN_PASSWORD:-}" generated=0 admin_output
-  if [[ -z "$admin_password" ]]; then
-    admin_password="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)"
-    generated=1
-  fi
-  admin_output="$(ADMIN_PASSWORD="$admin_password" docker compose exec -T -e ADMIN_PASSWORD web node scripts/make-admin.mjs "$ADMIN_EMAIL")" ||
-    die "Das Admin-Konto ließ sich nicht anlegen."
-  ok "$admin_output"
 
   # ── Fertig ──
   printf '\n%s%s✓ Fertig.%s\n\n' "$BOLD" "$GREEN" "$RESET"

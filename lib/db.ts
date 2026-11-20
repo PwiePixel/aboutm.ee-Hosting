@@ -103,7 +103,9 @@ const MIGRATIONS: string[] = [
   -- Spielzeit wird ab jetzt in Millisekunden gezählt, damit beim Runden nichts verloren geht.
   INSERT INTO stats (key, value) SELECT 'play_ms', value * 1000 FROM stats WHERE key = 'play_seconds';
   DELETE FROM stats WHERE key = 'play_seconds';
-  INSERT OR IGNORE INTO stats (key, value) VALUES ('since', CAST(strftime('%s', 'now') AS INTEGER) * 1000);
+  -- „Gezählt seit“: bei einer bestehenden Installation das älteste Konto, sonst jetzt.
+  INSERT OR IGNORE INTO stats (key, value)
+  VALUES ('since', COALESCE((SELECT MIN(created_at) FROM users), CAST(strftime('%s', 'now') AS INTEGER) * 1000));
   `,
 ]
 

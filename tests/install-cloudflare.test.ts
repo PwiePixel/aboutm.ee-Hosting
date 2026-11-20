@@ -190,6 +190,56 @@ describe('install.sh — Cloudflare einrichten', () => {
     expect(lookups.some((call) => call.query.includes('name.exact=%2A.example.com'))).toBe(true)
   })
 
+  it('trägt eine geänderte Website-Adresse beim vorhandenen Turnstile-Widget nach', async () => {
+    const first = await runCloudflareSetup(mock, BASE)
+    const keys = { TURNSTILE_SITE_KEY: first.result!.site!, TURNSTILE_SECRET_KEY: first.result!.secret! }
+
+    const moved = await runCloudflareSetup(mock, { ...BASE, ...keys, SITE_DOMAIN: 'play.example.com', AM_YES: '1' })
+    expect(moved.code, moved.stderr).toBe(0)
+    expect(mock.state.widgets).toHaveLength(1)
+    expect(mock.state.widgets[0]!.domains).toEqual(['hosting.example.com', 'play.example.com'])
+    expect(moved.result).toMatchObject({ site: keys.TURNSTILE_SITE_KEY, secret: keys.TURNSTILE_SECRET_KEY })
+
+    // Stimmt die Adresse schon, wird das Widget nicht angefasst.
+    const puts = () => mock.state.calls.filter((call) => call.method === 'PUT' && call.path.includes('/challenges/widgets/')).length
+    const before = puts()
+    await runCloudflareSetup(mock, { ...BASE, ...keys, SITE_DOMAIN: 'play.example.com', AM_YES: '1' })
+    expect(puts()).toBe(before)
+  })
+
+  it('überschreibt fremde Weiterleitungen eines gleichnamigen Tunnels nicht ohne Zustimmung', async () => {
+    const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+    const created = await fetch(`${mock.url}/accounts/acc1/cfd_tunnel`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ name: 'aboutmee', config_src: 'cloudflare' }),
+    })
+    const tunnelId = ((await created.json()) as { result: { id: string } }).result.id
+    const foreign = { ingress: [{ hostname: 'shop.example.com', service: 'http://shop:80' }, { service: 'http_status:404' }] }
+    await fetch(`${mock.url}/accounts/acc1/cfd_tunnel/${tunnelId}/configurations`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ config: foreign }),
+    })
+
+    const refused = await runCloudflareSetup(mock, BASE)
+    expect(refused.code).not.toBe(0)
+    expect(refused.stderr).toContain('shop.example.com')
+    expect(mock.state.tunnelConfigs[tunnelId]).toEqual(foreign)
+    expect(mock.state.dns).toHaveLength(0)
+
+    const agreed = await runCloudflareSetup(mock, { ...BASE, AM_YES: '1' })
+    expect(agreed.code, agreed.stderr).toBe(0)
+    expect(mock.state.tunnelConfigs[tunnelId]!.ingress[0]).toEqual({ hostname: 'hosting.example.com', service: 'http://web:3000' })
+  })
+
+  it('meldet einen API-Fehler bei der Domain-Suche als solchen — nicht als fehlende Domain', async () => {
+    const run = await runCloudflareSetup(mock, BASE, 'falsches-token')
+    expect(run.stderr).toContain('Invalid API token')
+    expect(run.stderr).not.toContain('keine Domain')
+    expect(run.stderr).not.toContain('Abgebrochen in Zeile')
+  })
+
   it('zeigt das Token nie in der Prozessliste', async () => {
     await runCloudflareSetup(mock, BASE)
     // Jeder Aufruf kam mit dem Token an — übergeben wurde es aber nur per Datei.
@@ -197,5 +247,44 @@ describe('install.sh — Cloudflare einrichten', () => {
     const script = (await import('node:fs')).readFileSync(path.join(ROOT, 'install.sh'), 'utf8')
     expect(script).toContain('--header "@$CF_HEADERS"')
     expect(script).not.toMatch(/curl[^\n]*Bearer \$/)
+  })
+})
+
+describe('install.sh — Einstellungen lesen und behalten', () => {
+  const bash = (script: string): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const child = spawn('bash', ['-c', `AM_SOURCE_ONLY=1 source ./install.sh\n${script}`], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
+      let out = ''
+      let err = ''
+      child.stdout.on('data', (chunk: Buffer) => (out += chunk.toString()))
+      child.stderr.on('data', (chunk: Buffer) => (err += chunk.toString()))
+      child.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(err || `exit ${code}`))))
+    })
+
+  it('liest Werte auch mit Anführungszeichen, Leerraum und angehängtem Kommentar', async () => {
+    const out = await bash(`
+      file="$(mktemp)"
+      printf '%s\\n' 'A=einfach' 'B="in Anführungszeichen"' "C='einfach gequotet'" 'D=wert   # Kommentar' '  E = mit-leerraum  ' 'F=' 'G=a#b' > "$file"
+      for key in A B C D E F G FEHLT; do printf '%s=[%s]\\n' "$key" "$(env_value "$file" "$key")"; done
+    `)
+    expect(out.trim().split('\n')).toEqual([
+      'A=[einfach]',
+      'B=[in Anführungszeichen]',
+      'C=[einfach gequotet]',
+      'D=[wert]',
+      'E=[mit-leerraum]',
+      'F=[]',
+      'G=[a#b]',
+      'FEHLT=[]',
+    ])
+  })
+
+  it('erkennt eigene Zeilen in der .env, damit ein erneuter Lauf sie nicht verliert', async () => {
+    const out = await bash(`
+      file="$(mktemp)"
+      printf '%s\\n' '# Kommentar' 'SITE_DOMAIN=x.example.com' 'UMAMI_SRC=https://stats.example.com/script.js' 'TUNNEL_TOKEN=geheim' 'MC_UID=1001' '' 'CF_BEACON_TOKEN="abc"' > "$file"
+      env_extras "$file"
+    `)
+    expect(out.trim().split('\n')).toEqual(['UMAMI_SRC=https://stats.example.com/script.js', 'MC_UID=1001', 'CF_BEACON_TOKEN="abc"'])
   })
 })

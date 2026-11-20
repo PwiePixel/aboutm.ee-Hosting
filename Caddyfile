@@ -1,4 +1,19 @@
+# Nur aktiv mit COMPOSE_PROFILES=caddy (Website direkt über diesen Server statt über den Tunnel).
+{
+	servers {
+		# Anfragen kommen normalerweise über Cloudflare. Nur dessen Servern wird geglaubt, wer der
+		# eigentliche Besucher ist — wer den Server direkt anspricht, kann sich keine fremde Adresse geben.
+		# Bereiche: https://www.cloudflare.com/ips/ (Stand 20.11.2026)
+		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+		client_ip_headers CF-Connecting-IP
+	}
+}
+
 {$SITE_DOMAIN} {
 	encode zstd gzip
-	reverse_proxy web:3000
+	reverse_proxy web:3000 {
+		# Die geprüfte Adresse weitergeben; die ungeprüfte Angabe des Besuchers entfernen.
+		header_up X-Real-IP {client_ip}
+		header_up -CF-Connecting-IP
+	}
 }

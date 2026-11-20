@@ -109,8 +109,8 @@ export function Turnstile({
   if (!siteKey) {
     return (
       <p className="border border-dashed border-line-strong px-3 py-2 text-[13px] text-ink-faint">
-        Sicherheitsprüfung ist nicht eingerichtet (Entwicklungsmodus). Für den Live-Betrieb Turnstile-Schlüssel
-        eintragen.
+        Die Sicherheitsprüfung ist nicht eingerichtet. In der Entwicklung geht es ohne — im Live-Betrieb bleiben
+        Formulare gesperrt, bis die Turnstile-Schlüssel eingetragen sind.
       </p>
     )
   }

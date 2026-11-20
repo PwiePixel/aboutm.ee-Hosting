@@ -11,6 +11,11 @@ export const dynamic = 'force-dynamic'
 const dayMonth = new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Berlin' })
 const longDate = new Intl.DateTimeFormat('de-DE', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Berlin' })
 
+function recordNote(value: number, at: number | null): string {
+  if (at) return `Rekord am ${dayMonth.format(new Date(at))}`
+  return value > 0 ? 'bisheriger Höchstwert' : 'noch kein Rekord'
+}
+
 export default function NumbersPage() {
   const stats = totals()
   const headline = playHeadline(stats.playMs)
@@ -23,13 +28,13 @@ export default function NumbersPage() {
     {
       value: stats.peakPlayers,
       label: 'Spieler gleichzeitig',
-      note: stats.peakPlayersAt ? `Rekord am ${dayMonth.format(new Date(stats.peakPlayersAt))}` : 'noch kein Rekord',
+      note: recordNote(stats.peakPlayers, stats.peakPlayersAt),
     },
     { value: stats.uniquePlayers, label: 'Verschiedene Spieler', note: 'jeder Minecraft-Name zählt einmal' },
     {
       value: stats.peakServers,
       label: 'Server gleichzeitig',
-      note: stats.peakServersAt ? `Rekord am ${dayMonth.format(new Date(stats.peakServersAt))}` : 'noch kein Rekord',
+      note: recordNote(stats.peakServers, stats.peakServersAt),
     },
     { value: onlineNow, label: 'Server gerade online', note: 'in diesem Moment' },
   ]

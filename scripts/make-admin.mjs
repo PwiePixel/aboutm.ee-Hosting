@@ -2,6 +2,7 @@
 //
 //   node scripts/make-admin.mjs du@example.com              bestehendes Konto zum Admin machen
 //   node scripts/make-admin.mjs du@example.com --entfernen  Admin-Rechte wieder wegnehmen
+//   node scripts/make-admin.mjs du@example.com --status     nur anzeigen: fehlt | konto | admin
 //   ADMIN_PASSWORD='…' node scripts/make-admin.mjs du@example.com
 //                                                           Konto mit diesem Passwort anlegen, falls es fehlt
 //
@@ -12,8 +13,8 @@ import path from 'node:path'
 import Database from 'better-sqlite3'
 
 const [rawEmail, flag] = process.argv.slice(2)
-if (!rawEmail || (flag && flag !== '--entfernen')) {
-  console.error('Aufruf: node scripts/make-admin.mjs <e-mail> [--entfernen]')
+if (!rawEmail || (flag && flag !== '--entfernen' && flag !== '--status')) {
+  console.error('Aufruf: node scripts/make-admin.mjs <e-mail> [--entfernen | --status]')
   process.exit(1)
 }
 const email = rawEmail.trim().toLowerCase()
@@ -48,7 +49,13 @@ try {
 }
 db.pragma('busy_timeout = 5000')
 
-const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email)
+const existing = db.prepare('SELECT id, is_admin FROM users WHERE email = ?').get(email)
+
+// Nur nachsehen: fehlt | konto (vorhanden, kein Admin) | admin
+if (flag === '--status') {
+  console.log(!existing ? 'fehlt' : existing.is_admin ? 'admin' : 'konto')
+  process.exit(0)
+}
 
 if (flag === '--entfernen') {
   if (!existing) {

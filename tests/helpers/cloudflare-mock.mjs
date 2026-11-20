@@ -84,6 +84,11 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
       return state.tunnels.some((t) => t.id === match[2]) ? ok(`tunneltoken.${match[2]}`) : fail(404, 'Tunnel not found')
     }
 
+    if ((match = path.match(/^\/accounts\/([^/]+)\/cfd_tunnel\/([^/]+)\/configurations$/)) && method === 'GET') {
+      if (!state.tunnels.some((t) => t.id === match[2])) return fail(404, 'Tunnel not found')
+      return ok({ tunnel_id: match[2], config: state.tunnelConfigs[match[2]] ?? null })
+    }
+
     if ((match = path.match(/^\/accounts\/([^/]+)\/cfd_tunnel\/([^/]+)\/configurations$/)) && method === 'PUT') {
       if (!state.tunnels.some((t) => t.id === match[2])) return fail(404, 'Tunnel not found')
       state.tunnelConfigs[match[2]] = body.config
@@ -97,6 +102,18 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
       const widget = { sitekey: `0x4AAA${id('key')}`, secret: `0x4BBB${id('sec')}`, ...body }
       state.widgets.push(widget)
       return ok(widget)
+    }
+
+    if ((match = path.match(/^\/accounts\/([^/]+)\/challenges\/widgets\/([^/]+)$/))) {
+      if (accountToken) return fail(403, 'Authentication error')
+      const widget = state.widgets.find((entry) => entry.sitekey === match[2])
+      if (!widget) return fail(404, 'Widget not found')
+      if (method === 'GET') return ok(widget)
+      if (method === 'PUT') {
+        if (!body.name || !Array.isArray(body.domains) || !body.mode) return fail(400, 'name, domains and mode are required')
+        Object.assign(widget, { name: body.name, domains: body.domains, mode: body.mode })
+        return ok(widget)
+      }
     }
 
     return fail(404, `No route for ${method} ${path}`)

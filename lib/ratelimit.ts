@@ -7,6 +7,11 @@ function buckets(): Map<string, Bucket> {
   return globals.__amRate
 }
 
+/** Ist das Limit schon erreicht? Zählt selbst nichts mit. */
+export function isLimited(key: string, limit: number, windowMs: number, now = Date.now()): boolean {
+  return (buckets().get(key) ?? []).filter((t) => now - t < windowMs).length >= limit
+}
+
 /**
  * Gleitendes Zeitfenster im Arbeitsspeicher. Gibt `true` zurück, wenn der Versuch
  * erlaubt ist, und zählt ihn dann mit.

@@ -5,15 +5,14 @@ import { clientIp, createSession, currentUser, destroyAllSessions, destroySessio
 import { db } from '../db'
 import { newUserId } from '../ids'
 import { hashPassword, verifyAgainstDummy, verifyPassword } from '../password'
-import { allowAttempt } from '../ratelimit'
-import { verifyTurnstile } from '../turnstile'
+import { allowAttempt, isLimited } from '../ratelimit'
+import { turnstileProblem } from '../turnstile'
 import { normalizeEmail, passwordProblem } from '../validation'
 import { deleteWorld, listWorlds } from '../worlds'
 import type { ActionState } from './state'
 
 const TEN_MINUTES = 10 * 60 * 1000
 const HOUR = 60 * 60 * 1000
-const CHECK_FAILED = 'Die Sicherheitsprüfung hat nicht geklappt. Lade die Seite neu und versuch es noch einmal.'
 const TOO_MANY = 'Zu viele Versuche. Warte ein paar Minuten und versuch es dann noch einmal.'
 
 export async function registerAction(_previous: ActionState, formData: FormData): Promise<ActionState> {
@@ -24,7 +23,8 @@ export async function registerAction(_previous: ActionState, formData: FormData)
   const ip = await clientIp()
 
   if (!allowAttempt(`register:${ip ?? 'unbekannt'}`, 5, HOUR)) return { error: TOO_MANY, values }
-  if (!(await verifyTurnstile(formData, ip))) return { error: CHECK_FAILED, values }
+  const check = await turnstileProblem(formData, ip)
+  if (check) return { error: check, values }
 
   const email = normalizeEmail(rawEmail)
   if (!email) return { error: 'Gib eine gültige E-Mail-Adresse ein.', values }
@@ -57,9 +57,16 @@ export async function loginAction(_previous: ActionState, formData: FormData): P
   const email = normalizeEmail(rawEmail)
   const password = formData.get('password')
 
-  if (!allowAttempt(`login:ip:${ip ?? 'unbekannt'}`, 20, TEN_MINUTES)) return { error: TOO_MANY, values }
-  if (email && !allowAttempt(`login:mail:${email}`, 8, TEN_MINUTES)) return { error: TOO_MANY, values }
-  if (!(await verifyTurnstile(formData, ip))) return { error: CHECK_FAILED, values }
+  if (!allowAttempt(`login:ip:${ip ?? 'unbekannt'}`, 30, TEN_MINUTES)) return { error: TOO_MANY, values }
+  const check = await turnstileProblem(formData, ip)
+  if (check) return { error: check, values }
+  // Die Limits je Konto greifen erst nach bestandener Sicherheitsprüfung und zählen je Absender —
+  // sonst könnte jeder ein fremdes Konto mit ein paar leeren Anfragen aussperren.
+  if (email && !allowAttempt(`login:mail:${email}:${ip ?? 'unbekannt'}`, 8, TEN_MINUTES)) {
+    return { error: TOO_MANY, values }
+  }
+  // Gegen verteiltes Durchprobieren: sehr viele Fehlversuche auf ein Konto, egal von wo.
+  if (email && isLimited(`login:fail:${email}`, 60, HOUR)) return { error: TOO_MANY, values }
 
   const wrong: ActionState = { error: 'E-Mail oder Passwort stimmt nicht.', values }
   if (!email || typeof password !== 'string' || password.length === 0 || password.length > 200) return wrong
@@ -71,7 +78,10 @@ export async function loginAction(_previous: ActionState, formData: FormData): P
     await verifyAgainstDummy(password)
     return wrong
   }
-  if (!(await verifyPassword(password, user.password_hash))) return wrong
+  if (!(await verifyPassword(password, user.password_hash))) {
+    allowAttempt(`login:fail:${email}`, 60, HOUR)
+    return wrong
+  }
 
   await createSession(user.id)
   redirect('/app')

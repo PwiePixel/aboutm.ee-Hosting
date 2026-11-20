@@ -53,6 +53,14 @@ export const config = {
 
   turnstileSiteKey: process.env.TURNSTILE_SITE_KEY ?? '',
   turnstileSecret: process.env.TURNSTILE_SECRET_KEY ?? '',
+  /** Nur zum Ausprobieren: Formulare im Live-Betrieb auch ohne Turnstile-Schlüssel annehmen. */
+  allowNoTurnstile: process.env.ALLOW_NO_TURNSTILE === '1',
+
+  /**
+   * Kopfzeile, aus der die Adresse des Besuchers gelesen wird. Sie muss von einer Stelle gesetzt sein,
+   * der wir trauen: hinter dem Cloudflare-Tunnel „cf-connecting-ip“, hinter Caddy „x-real-ip“.
+   */
+  clientIpHeader: (process.env.CLIENT_IP_HEADER ?? 'cf-connecting-ip').toLowerCase(),
 
   analytics: {
     umamiSrc: process.env.UMAMI_SRC ?? '',

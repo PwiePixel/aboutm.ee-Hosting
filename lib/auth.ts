@@ -74,11 +74,16 @@ export async function requireAdmin(): Promise<User> {
   return user
 }
 
-/** Adresse des Besuchers — hinter Cloudflare aus CF-Connecting-IP. */
+/**
+ * Adresse des Besuchers — für Anmelde-Limits und die Turnstile-Prüfung. Gelesen wird nur die eine
+ * Kopfzeile, die der vorgeschaltete Dienst selbst setzt (siehe config.clientIpHeader); alles andere
+ * könnte der Besucher frei erfinden und damit die Limits umgehen.
+ */
 export async function clientIp(): Promise<string | null> {
   const list = await headers()
-  const direct = list.get('cf-connecting-ip')
-  if (direct) return direct.trim()
-  const forwarded = list.get('x-forwarded-for')?.split(',')[0]?.trim()
-  return forwarded || null
+  const trusted = list.get(config.clientIpHeader)?.split(',')[0]?.trim()
+  if (trusted) return trusted
+  // Ohne vorgeschalteten Dienst (lokale Entwicklung) hilft die Angabe des Entwicklungsservers.
+  if (process.env.NODE_ENV !== 'production') return list.get('x-forwarded-for')?.split(',')[0]?.trim() || null
+  return null
 }

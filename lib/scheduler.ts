@@ -19,7 +19,11 @@ export function startScheduler(): void {
     console.warn('[aboutm.ee] Vorschau-Modus: Es werden keine echten Minecraft-Server gestartet.')
   }
   if (!turnstileEnabled && process.env.NODE_ENV === 'production') {
-    console.warn('[aboutm.ee] Cloudflare Turnstile ist nicht konfiguriert — Formulare laufen ohne Bot-Prüfung.')
+    console.warn(
+      config.allowNoTurnstile
+        ? '[aboutm.ee] Cloudflare Turnstile ist nicht konfiguriert — Formulare laufen ohne Bot-Prüfung (ALLOW_NO_TURNSTILE=1).'
+        : '[aboutm.ee] Cloudflare Turnstile ist nicht konfiguriert — Anmeldung, Registrierung und Hilfe-Formular sind gesperrt, bis TURNSTILE_SITE_KEY und TURNSTILE_SECRET_KEY gesetzt sind.',
+    )
   }
 
   const run = () => {

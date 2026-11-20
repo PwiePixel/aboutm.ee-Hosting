@@ -4,7 +4,7 @@ import { clientIp, currentUser } from '../auth'
 import { db } from '../db'
 import { newFeedbackId } from '../ids'
 import { allowAttempt } from '../ratelimit'
-import { verifyTurnstile } from '../turnstile'
+import { turnstileProblem } from '../turnstile'
 import { MESSAGE_MAX, normalizeEmail } from '../validation'
 import type { ActionState } from './state'
 
@@ -22,9 +22,8 @@ export async function sendFeedbackAction(_previous: ActionState, formData: FormD
   if (!allowAttempt(`feedback:${ip ?? 'unbekannt'}`, 5, 60 * 60 * 1000)) {
     return { error: 'Du hast gerade mehrere Nachrichten geschickt. Versuch es später noch einmal.', values }
   }
-  if (!(await verifyTurnstile(formData, ip))) {
-    return { error: 'Die Sicherheitsprüfung hat nicht geklappt. Lade die Seite neu und versuch es noch einmal.', values }
-  }
+  const check = await turnstileProblem(formData, ip)
+  if (check) return { error: check, values }
   if (!CATEGORIES.includes(category)) return { error: 'Wähle, worum es geht.', values }
 
   let email: string | null = null

@@ -16,6 +16,8 @@ services:
       DATA_DIR: ${DATA_PATH:-/srv/aboutmee/data}
       HOST_DATA_DIR: ${DATA_PATH:-/srv/aboutmee/data}
       MC_NETWORK: aboutmee-mc
+      # Woher die Adresse des Besuchers kommt: der Tunnel setzt cf-connecting-ip, Caddy setzt x-real-ip.
+      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-cf-connecting-ip}
     volumes:
       - ${DATA_PATH:-/srv/aboutmee/data}:${DATA_PATH:-/srv/aboutmee/data}
       - /var/run/docker.sock:/var/run/docker.sock
@@ -36,6 +38,10 @@ services:
       IN_DOCKER: "true"
       DOCKER_NETWORK: aboutmee-mc
       CONNECTION_RATE_LIMIT: "20"
+      # Reicht die echte Adresse jedes Spielers an den Server weiter. Ohne das kämen alle von der Adresse
+      # des Routers: gleichzeitig beitretende Freunde würden gedrosselt, und eine IP-Sperre träfe alle.
+      # Die Website stellt dazu bei jeder Welt proxy-protocol in der Paper-Konfiguration ein.
+      USE_PROXY_PROTOCOL: "true"
     ports:
       - "25565:25565"
     volumes:

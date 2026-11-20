@@ -145,9 +145,12 @@ export type DayStats = {
 
 /** Die letzten Tage, neuester zuerst — auch Tage, an denen nichts passiert ist. */
 export function dailyStats(days = 14, now = Date.now()): DayStats[] {
-  const wanted = Array.from({ length: days }, (_, index) => berlinDay(now - index * 86_400_000))
-  // Bei der Zeitumstellung kann ein Tag doppelt auftauchen.
-  const unique = [...new Set(wanted)]
+  // Rückwärts im Kalender zählen, nicht in 24-Stunden-Schritten: Tage mit Zeitumstellung
+  // haben 23 oder 25 Stunden, und sonst fiele einer aus oder käme doppelt.
+  const [year, month, day] = berlinDay(now).split('-').map(Number) as [number, number, number]
+  const unique = Array.from({ length: days }, (_, index) =>
+    new Date(Date.UTC(year, month - 1, day - index)).toISOString().slice(0, 10),
+  )
   const rows = db()
     .prepare(`SELECT day, key, value FROM stats_daily WHERE day >= ?`)
     .all(unique.at(-1)!) as Array<{ day: string; key: string; value: number }>

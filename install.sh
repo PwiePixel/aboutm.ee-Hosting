@@ -389,7 +389,10 @@ main() {
   auto_pause="$(env_value "$env_file" AUTO_PAUSE_MINUTES)"
   mc_cpus="$(env_value "$env_file" MC_CPUS)"
   support_email="$(env_value "$env_file" SUPPORT_EMAIL)"
-  [[ -f "$env_file" ]] && cp -p "$env_file" "$env_file.bak"
+  if [[ -f "$env_file" ]]; then
+    cp -p "$env_file" "$env_file.bak"
+    chmod 600 "$env_file.bak" # enthält dieselben Geheimnisse wie die .env
+  fi
   (
     umask 077
     cat >"$env_file" <<EOF

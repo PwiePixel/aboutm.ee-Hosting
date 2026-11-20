@@ -78,6 +78,22 @@ describe('Statistik', () => {
     expect(berlinDay(Date.UTC(2026, 6, 1, 22, 30))).toBe('2026-07-02') // 00:30 MESZ
   })
 
+  it('listet die letzten Tage lückenlos — auch über die Zeitumstellung hinweg', () => {
+    // 29.03.2026 hat in Deutschland nur 23 Stunden. Kurz nach Mitternacht am 30.03.:
+    const afterSpringForward = Date.UTC(2026, 2, 29, 22, 30) // 00:30 MESZ am 30.03.
+    expect(dailyStats(4, afterSpringForward).map((entry) => entry.day)).toEqual([
+      '2026-03-30',
+      '2026-03-29',
+      '2026-03-28',
+      '2026-03-27',
+    ])
+    // 25.10.2026 hat 25 Stunden. Spät am Abend:
+    const lateOnLongDay = Date.UTC(2026, 9, 25, 22, 30) // 23:30 MEZ am 25.10.
+    expect(dailyStats(3, lateOnLongDay).map((entry) => entry.day)).toEqual(['2026-10-25', '2026-10-24', '2026-10-23'])
+    // Über den Monatswechsel
+    expect(dailyStats(3, Date.UTC(2026, 2, 1, 12)).map((entry) => entry.day)).toEqual(['2026-03-01', '2026-02-28', '2026-02-27'])
+  })
+
   it('formuliert die große Zahl passend', () => {
     expect(playHeadline(0)).toEqual({ prefix: '', value: '0', unit: 'Spielminuten' })
     expect(playHeadline(59 * 60_000)).toEqual({ prefix: '', value: '59', unit: 'Spielminuten' })

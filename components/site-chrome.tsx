@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { currentUser } from '@/lib/auth'
+import { Disclaimer } from './disclaimer'
 import { Logo } from './logo'
 
 export async function SiteHeader() {
@@ -60,11 +61,11 @@ export function SiteFooter() {
           <Link href="/datenschutz" className="hover:text-ink">
             Datenschutz
           </Link>
+          <Link href="/bildnachweise" className="hover:text-ink">
+            Bildnachweise
+          </Link>
         </nav>
-        <p className="mt-6 max-w-[640px] text-[13px] text-ink-faint">
-          Kein offizielles Minecraft-Produkt. Nicht von Mojang oder Microsoft genehmigt und nicht mit ihnen verbunden.
-          Minecraft ist eine Marke der Mojang Synergies AB.
-        </p>
+        <Disclaimer className="mt-6 max-w-[680px]" />
       </div>
     </footer>
   )

@@ -1,4 +1,4 @@
-import { db, readStat } from './db'
+import { db } from './db'
 import { runtime } from './runtime'
 import type { World, WorldStatus } from './runtime/types'
 import { limits } from './settings'
@@ -108,14 +108,7 @@ export function adminFeedback(): AdminFeedback[] {
   return rows.map((row) => ({ ...row, createdAt: row.created_at }))
 }
 
-export function adminTotals(): { users: number; worlds: number; starts: number; playHours: number; peak: number; feedback: number } {
+export function adminCounts(): { users: number; worlds: number; feedback: number } {
   const count = (table: string) => (db().prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
-  return {
-    users: count('users'),
-    worlds: count('worlds'),
-    feedback: count('feedback'),
-    starts: readStat('starts'),
-    playHours: Math.floor(readStat('play_seconds') / 3600),
-    peak: readStat('peak_players'),
-  }
+  return { users: count('users'), worlds: count('worlds'), feedback: count('feedback') }
 }

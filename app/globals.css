@@ -265,10 +265,6 @@
   .link:hover {
     text-decoration-color: var(--color-accent);
   }
-
-  .pixelated {
-    image-rendering: pixelated;
-  }
 }
 
 @keyframes spin {

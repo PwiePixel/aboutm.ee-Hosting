@@ -5,7 +5,7 @@ import { notFound } from 'next/navigation'
 import type { ReactNode } from 'react'
 import { CopyAddress, LiveError, LiveStatusBadge, QuickControl, WorldTabs } from '@/components/world-header'
 import { WorldLiveProvider } from '@/components/world-live'
-import { isPixelArt, worldArt } from '@/lib/art'
+import { worldArt } from '@/lib/art'
 import { requireUser } from '@/lib/auth'
 import { config } from '@/lib/config'
 import { formatMiBAsGiB } from '@/lib/format'
@@ -39,7 +39,7 @@ export default async function WorldLayout({
           height={320}
           unoptimized
           priority
-          className={`block h-[220px] w-full object-cover sm:h-[300px] ${isPixelArt(art) ? 'pixelated' : ''}`}
+          className="block h-[220px] w-full object-cover sm:h-[300px]"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-base/90 via-base/20 to-transparent" />
         <span className="absolute right-4 top-4">

@@ -20,6 +20,9 @@ export type World = {
   restart_pending: number
   pause_reason: string | null
   created_at: number
+  /** Gemessene Spielzeit: Summe über alle Spieler, in Millisekunden. */
+  play_ms: number
+  starts: number
 }
 
 /** Was der Treiber über den tatsächlichen Prozess weiß. */

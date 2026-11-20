@@ -7,6 +7,7 @@ import { config } from '@/lib/config'
 import { worldDiskUsage } from '@/lib/files'
 import { formatBytes, formatMiBAsGiB, formatRelative } from '@/lib/format'
 import { limits } from '@/lib/settings'
+import { formatPlayTime } from '@/lib/stats'
 import { difficultyLabel, gamemodeLabel } from '@/lib/versions'
 import { getWorld } from '@/lib/worlds'
 
@@ -37,6 +38,7 @@ export default async function WorldOverviewPage({
     ['CPU', <LiveUsage key="cpu" kind="cpu" ramLimitMiB={config.ramMiB} />],
     ['RAM', <LiveUsage key="ram" kind="ram" ramLimitMiB={config.ramMiB} />],
     ['Dateien', `${formatBytes(worldDiskUsage(world.id))} von ${config.diskGiB} GiB`],
+    ['Gespielt', `${formatPlayTime(world.play_ms)} · ${world.starts} ${world.starts === 1 ? 'Start' : 'Starts'}`],
     ['Erstellt', formatRelative(world.created_at)],
   ]
 

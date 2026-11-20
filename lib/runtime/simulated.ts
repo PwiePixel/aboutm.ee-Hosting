@@ -18,6 +18,7 @@ type Instance = {
   pending: Line[]
   logs: string[]
   logFile: string
+  players: string[]
 }
 
 const START_MS = 8000
@@ -116,6 +117,7 @@ export const simulatedDriver: RuntimeDriver = {
       pending: [],
       logs: [],
       logFile,
+      players: [],
     }
     const mode = world.gamemode.toUpperCase()
     queue(instance, now, [
@@ -155,8 +157,9 @@ export const simulatedDriver: RuntimeDriver = {
     return 2
   },
 
-  async players(): Promise<string[]> {
-    return []
+  async players(world: World): Promise<string[]> {
+    const instance = advance(world.id, Date.now())
+    return instance?.phase === 'online' ? [...instance.players] : []
   },
 
   async stats(world: World): Promise<RuntimeStats | null> {
@@ -188,7 +191,27 @@ export const simulatedDriver: RuntimeDriver = {
         beginStop(instance, now)
         break
       case 'list':
-        reply(instance, `There are 0 of a max of ${config.maxPlayers} players online: `)
+        reply(
+          instance,
+          `There are ${instance.players.length} of a max of ${config.maxPlayers} players online: ${instance.players.join(', ')}`,
+        )
+        break
+      // Nur im Vorschau-Modus: so tun, als käme oder ginge ein Spieler — zum Ausprobieren von Statistik und Auto-Pause.
+      case 'testjoin':
+        if (/^[A-Za-z0-9_]{3,16}$/.test(argument) && !instance.players.includes(argument)) {
+          instance.players.push(argument)
+          reply(instance, `${argument} joined the game`)
+        } else {
+          reply(instance, 'Aufruf: testjoin <Minecraft-Name>')
+        }
+        break
+      case 'testleave':
+        if (instance.players.includes(argument)) {
+          instance.players = instance.players.filter((name) => name !== argument)
+          reply(instance, `${argument} left the game`)
+        } else {
+          reply(instance, 'Aufruf: testleave <Minecraft-Name>')
+        }
         break
       case 'say':
         reply(instance, `[Server] ${argument}`)
@@ -221,7 +244,7 @@ export const simulatedDriver: RuntimeDriver = {
         reply(instance, 'Automatic saving is now enabled')
         break
       case 'help':
-        reply(instance, 'Vorschau-Modus kennt: list, say, seed, difficulty, defaultgamemode, whitelist, save-all, stop')
+        reply(instance, 'Vorschau-Modus kennt: list, say, seed, difficulty, defaultgamemode, whitelist, save-all, stop, testjoin, testleave')
         break
       default:
         reply(instance, `Unknown or incomplete command, see below for error`)

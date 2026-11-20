@@ -2,7 +2,9 @@
 #   web    – die Website mit Verwaltung; startet die Minecraft-Container
 #   router – nimmt Minecraft-Verbindungen auf Port 25565 an und leitet sie
 #            anhand der Adresse (mc-xxxx.<SERVER_DOMAIN>) an die richtige Welt
-#   caddy  – HTTPS für die Website
+#   tunnel – Cloudflare-Tunnel: bringt die Website ins Netz, ohne dass Port 80/443 offen sein muss
+#   caddy  – Alternative zum Tunnel: HTTPS direkt über diesen Server
+# Welcher der beiden läuft, bestimmt COMPOSE_PROFILES in .env (tunnel oder caddy).
 services:
   web:
     build: .
@@ -17,6 +19,12 @@ services:
     volumes:
       - ${DATA_PATH:-/srv/aboutmee/data}:${DATA_PATH:-/srv/aboutmee/data}
       - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks: [web]
 
   router:
@@ -34,11 +42,21 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [mc]
 
+  tunnel:
+    profiles: [tunnel]
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    networks: [web]
+
   caddy:
+    profiles: [caddy]
     image: caddy:2
     restart: unless-stopped
     environment:
-      SITE_DOMAIN: ${SITE_DOMAIN:?SITE_DOMAIN in .env eintragen, z. B. aboutm.ee}
+      SITE_DOMAIN: ${SITE_DOMAIN:-localhost}
     ports:
       - "80:80"
       - "443:443"

@@ -83,6 +83,28 @@ const MIGRATIONS: string[] = [
     value TEXT NOT NULL
   );
   `,
+  `
+  -- Statistik: Tageswerte, verschiedene Spieler (nur als Hash) und Zähler je Welt.
+  CREATE TABLE stats_daily (
+    day TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value INTEGER NOT NULL,
+    PRIMARY KEY (day, key)
+  );
+
+  CREATE TABLE players_seen (
+    hash TEXT PRIMARY KEY,
+    first_seen INTEGER NOT NULL
+  );
+
+  ALTER TABLE worlds ADD COLUMN play_ms INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE worlds ADD COLUMN starts INTEGER NOT NULL DEFAULT 0;
+
+  -- Spielzeit wird ab jetzt in Millisekunden gezählt, damit beim Runden nichts verloren geht.
+  INSERT INTO stats (key, value) SELECT 'play_ms', value * 1000 FROM stats WHERE key = 'play_seconds';
+  DELETE FROM stats WHERE key = 'play_seconds';
+  INSERT OR IGNORE INTO stats (key, value) VALUES ('since', CAST(strftime('%s', 'now') AS INTEGER) * 1000);
+  `,
 ]
 
 type Globals = { __amDb?: Database.Database }
@@ -108,25 +130,4 @@ function open(): Database.Database {
 export function db(): Database.Database {
   globals.__amDb ??= open()
   return globals.__amDb
-}
-
-export function bumpStat(key: string, by = 1): void {
-  db()
-    .prepare(
-      'INSERT INTO stats (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = value + excluded.value',
-    )
-    .run(key, by)
-}
-
-export function maxStat(key: string, value: number): void {
-  db()
-    .prepare(
-      'INSERT INTO stats (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)',
-    )
-    .run(key, value)
-}
-
-export function readStat(key: string): number {
-  const row = db().prepare('SELECT value FROM stats WHERE key = ?').get(key) as { value: number } | undefined
-  return row?.value ?? 0
 }

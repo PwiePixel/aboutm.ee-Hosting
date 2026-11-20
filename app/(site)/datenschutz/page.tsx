@@ -52,6 +52,13 @@ export default function PrivacyPage() {
         und IP-Adresse — das ist für den Spielbetrieb nötig. In der Webkonsole blenden wir IP-Adressen aus.
       </p>
 
+      <h2>Zahlen zur Nutzung</h2>
+      <p>
+        Wir zählen, wie viele Welten erstellt und gestartet wurden, wie lange gespielt wurde und wie viele Spieler
+        gleichzeitig online waren. Um verschiedene Spieler zählen zu können, speichern wir je Minecraft-Namen einen
+        nicht umkehrbaren Fingerabdruck (gesalzener Hash) — nicht den Namen selbst.
+      </p>
+
       <h2>Statistik</h2>
       {analytics ? (
         <p>

@@ -1,12 +1,12 @@
 import { ArrowRight, Check, Plus } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
-import { imageUrl, isPixelArt } from '@/lib/art'
+import { imageUrl } from '@/lib/art'
 import { currentUser } from '@/lib/auth'
 import { config } from '@/lib/config'
 import { formatMiBAsGiB, formatNumber } from '@/lib/format'
-import { readStat } from '@/lib/db'
 import { limits } from '@/lib/settings'
+import { playHeadline, totals } from '@/lib/stats'
 import { RECOMMENDED_VERSION, VERSIONS } from '@/lib/versions'
 import { slotsFree } from '@/lib/worlds'
 
@@ -22,7 +22,8 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
   const limit = limits()
   const free = slotsFree()
   const ram = formatMiBAsGiB(config.ramMiB)
-  const playHours = Math.floor(readStat('play_seconds') / 3600)
+  const stats = totals()
+  const headline = playHeadline(stats.playMs)
   const oldest = VERSIONS.at(-1)!.id
   const cta = user ? '/app' : '/register'
   const hero = imageUrl('hero')
@@ -110,12 +111,12 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
         <div className="mt-12 border border-line">
           <Image
             src={hero}
-            alt="Minecraft-Landschaft mit Hügeln, Bäumen und einem See unter blauem Himmel"
+            alt="Minecraft-Landschaft: eine ruhige Bucht mit bewaldeter Küste unter blauem Himmel"
             width={960}
             height={420}
             priority
             unoptimized
-            className={`block aspect-[16/7] w-full object-cover ${isPixelArt(hero) ? 'pixelated' : ''}`}
+            className="block aspect-[16/7] w-full object-cover"
           />
         </div>
         <p className="mt-4 text-center text-[14px] text-ink-dim" aria-live="polite">
@@ -124,23 +125,36 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
         </p>
       </section>
 
-      {/* Zahlen — erst sichtbar, wenn es etwas zu zeigen gibt */}
-      {playHours >= 10 && (
-        <section className="wrap mt-24">
-          <div className="panel flex flex-wrap items-end justify-between gap-6 p-7 sm:p-10">
+      {/* Zahlen — live aus der Statistik */}
+      <section className="wrap mt-24">
+        <div className="panel p-7 sm:p-10">
+          <div className="flex flex-wrap items-end justify-between gap-6">
             <div>
-              <p className="eyebrow">Bisher gespielt</p>
-              <p className="display mt-3 text-[clamp(36px,6vw,64px)]">
-                {formatNumber(playHours)} <span className="text-accent">Stunden.</span>
+              <p className="display text-[clamp(36px,6.4vw,68px)]">
+                {headline.prefix && <span className="text-ink-dim">{headline.prefix} </span>}
+                {headline.value} <span className="text-accent">{headline.unit}.</span>
               </p>
+              <p className="mt-3 text-ink-dim">Von echten Spielern auf echten Servern.</p>
             </div>
             <Link href="/zahlen" className="btn">
               Alle Zahlen ansehen
               <ArrowRight aria-hidden />
             </Link>
           </div>
-        </section>
-      )}
+          <dl className="mt-8 grid gap-px border border-line bg-line sm:grid-cols-3">
+            {[
+              { value: stats.worldsCreated, label: 'Server erstellt' },
+              { value: stats.starts, label: 'Server-Starts' },
+              { value: stats.peakPlayers, label: 'Spieler gleichzeitig' },
+            ].map((figure) => (
+              <div key={figure.label} className="bg-base p-5">
+                <dd className="display text-[34px]">{formatNumber(figure.value)}</dd>
+                <dt className="mt-1 text-[14px] text-ink-dim">{figure.label}</dt>
+              </div>
+            ))}
+          </dl>
+        </div>
+      </section>
 
       {/* Ablauf */}
       <section id="ablauf" className="wrap mt-24 scroll-mt-8">

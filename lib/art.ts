@@ -4,7 +4,8 @@ import { config } from './config'
 
 /**
  * Bilder der Website. Im Admin-Bereich lassen sich eigene Minecraft-Screenshots hochladen;
- * sie liegen unter <DATA_DIR>/bilder. Fehlt ein Bild, springt die mitgelieferte Grafik ein.
+ * sie liegen unter <DATA_DIR>/bilder. Fehlt ein eigenes Bild, erscheint das mitgelieferte aus public/art/
+ * (echte Minecraft-Screenshots unter freier Lizenz — Urheber und Lizenz stehen in lib/credits.ts).
  */
 export const WORLD_IMAGE_COUNT = 6
 export const IMAGE_SLOTS = ['hero', ...Array.from({ length: WORLD_IMAGE_COUNT }, (_, i) => `welt-${i + 1}`)] as const
@@ -34,12 +35,7 @@ export function customImage(slot: ImageSlot): CustomImage | null {
 
 export function imageUrl(slot: ImageSlot): string {
   const custom = customImage(slot)
-  return custom ? `/bilder/${slot}?v=${custom.version}` : `/art/${slot}.svg`
-}
-
-/** Eigene Fotos werden weich skaliert, die mitgelieferten Pixelgrafiken kantig. */
-export function isPixelArt(url: string): boolean {
-  return url.startsWith('/art/')
+  return custom ? `/bilder/${slot}?v=${custom.version}` : `/art/${slot}.webp`
 }
 
 /** Jede Welt bekommt dauerhaft dasselbe Bild — abgeleitet aus ihrer Kennung. */

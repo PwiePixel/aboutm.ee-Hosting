@@ -1,6 +1,7 @@
 import { ArrowLeft } from 'lucide-react'
 import Link from 'next/link'
 import type { ReactNode } from 'react'
+import { Disclaimer } from '@/components/disclaimer'
 import { Logo } from '@/components/logo'
 
 export default function AuthLayout({ children }: { children: ReactNode }) {
@@ -12,6 +13,7 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
         <ArrowLeft className="size-4" aria-hidden />
         Zurück zur Startseite
       </Link>
+      <Disclaimer className="mt-10" />
     </main>
   )
 }

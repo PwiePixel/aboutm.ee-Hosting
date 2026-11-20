@@ -31,8 +31,9 @@ export default function ImprintPage() {
       </p>
       <h2>Hinweis zu Minecraft</h2>
       <p>
-        aboutm.ee ist kein offizielles Minecraft-Produkt und wird weder von Mojang noch von Microsoft genehmigt oder
-        unterstützt. Minecraft ist eine Marke der Mojang Synergies AB.
+        aboutm.ee ist kein offizieller Minecraft-Dienst und wird weder von Mojang noch von Microsoft genehmigt oder
+        unterstützt. Für dieses Angebot ist allein der oben genannte Betreiber verantwortlich — nicht Mojang oder
+        Microsoft. Minecraft ist eine Marke der Mojang Synergies AB.
       </p>
     </LegalPage>
   )

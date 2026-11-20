@@ -1,13 +1,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { config } from './config'
-import { bumpStat, db, maxStat } from './db'
+import { db } from './db'
 import { directorySize } from './files'
 import { newWorldId, randomId } from './ids'
 import { backupsDir, worldDir } from './paths'
 import { runtime } from './runtime'
 import type { World, WorldStatus } from './runtime/types'
 import { limits } from './settings'
+import { recordConcurrency, recordPlay, recordStart, recordWorldCreated } from './stats'
 import { findVersion, newerVersions } from './versions'
 
 export type { World, WorldStatus }
@@ -106,7 +107,7 @@ export function createWorld(userId: string, input: NewWorld): World {
         now,
         now,
       )
-    bumpStat('worlds_created')
+    recordWorldCreated(now)
     return id
   })
   const id = create()
@@ -323,7 +324,8 @@ export async function tick(hooks: Hooks = {}, now = Date.now()): Promise<void> {
   const state = globals.__amTick
   if (state.running) return
   state.running = true
-  const elapsedSeconds = Math.min(10, Math.max(0, (now - state.last) / 1000))
+  // Nach einer Pause des Prozesses höchstens zehn Sekunden nachtragen — lieber zu wenig als erfundene Spielzeit.
+  const elapsedMs = Math.min(10_000, Math.max(0, now - state.last))
   state.last = now
 
   try {
@@ -332,6 +334,7 @@ export async function tick(hooks: Hooks = {}, now = Date.now()): Promise<void> {
       .prepare(`SELECT * FROM worlds WHERE status IN ('starting', 'online', 'stopping')`)
       .all() as World[]
     let playersOnline = 0
+    let serversOnline = 0
     const autoPauseMs = limits().autoPauseMinutes * 60_000
 
     for (const world of active) {
@@ -341,7 +344,7 @@ export async function tick(hooks: Hooks = {}, now = Date.now()): Promise<void> {
         if (world.status === 'starting') {
           if (actual === 'online') {
             setStatus(world, 'online', { started_at: now, last_active_at: now })
-            bumpStat('starts')
+            recordStart(world.id, now)
           } else if (actual === 'stopped') {
             setStatus(world, 'paused', { pause_reason: 'error' })
           }
@@ -357,11 +360,12 @@ export async function tick(hooks: Hooks = {}, now = Date.now()): Promise<void> {
           } else {
             const players = await driver.players(world)
             playersOnline += players.length
+            serversOnline += 1
             if (diskCheckDue(world.id, now) && directorySize(worldDir(world.id)) > DISK_QUOTA_BYTES) {
               await requestStop(world, 'disk')
             } else if (players.length > 0) {
               db().prepare('UPDATE worlds SET last_active_at = ? WHERE id = ?').run(now, world.id)
-              bumpStat('play_seconds', Math.round(players.length * elapsedSeconds))
+              recordPlay(world.id, players, elapsedMs, now)
             } else if (now - (world.last_active_at ?? world.status_since) >= autoPauseMs) {
               await requestStop(world, 'idle')
             }
@@ -381,7 +385,7 @@ export async function tick(hooks: Hooks = {}, now = Date.now()): Promise<void> {
         console.error(`[aboutm.ee] Welt ${world.id}:`, error)
       }
     }
-    if (playersOnline > 0) maxStat('peak_players', playersOnline)
+    recordConcurrency(playersOnline, serversOnline, now)
 
     const free = slotsFree()
     if (free > 0) {

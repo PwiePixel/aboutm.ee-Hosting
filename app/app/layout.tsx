@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
 import { AppHeader } from '@/components/app-header'
+import { SlimFooter } from '@/components/disclaimer'
 import { requireUser } from '@/lib/auth'
 import { runtime } from '@/lib/runtime'
 
@@ -19,6 +20,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
       <main id="inhalt" className="wrap pb-24 pt-10">
         {children}
       </main>
+      <SlimFooter />
     </>
   )
 }

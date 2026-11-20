@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
 import { AdminTabs } from '@/components/admin'
 import { AppHeader } from '@/components/app-header'
+import { SlimFooter } from '@/components/disclaimer'
 import { requireAdmin } from '@/lib/auth'
 import { runtime } from '@/lib/runtime'
 
@@ -24,6 +25,7 @@ export default async function AdminLayout({ children }: { children: ReactNode })
         </div>
         <div className="mt-8">{children}</div>
       </main>
+      <SlimFooter />
     </>
   )
 }

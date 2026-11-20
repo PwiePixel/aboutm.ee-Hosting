@@ -335,13 +335,13 @@ export function ImageSlotCard({
       <img
         src={url}
         alt={`Aktuelles Bild für ${title}`}
-        className={`block aspect-[16/7] w-full object-cover ${custom ? '' : 'pixelated'}`}
+        className="block aspect-[16/7] w-full object-cover"
       />
       <div className="space-y-3 p-4">
         <div>
           <h3 className="font-semibold">{title}</h3>
           <p className="text-[13px] text-ink-dim">
-            {hint} {custom ? 'Eigenes Bild aktiv.' : 'Noch die mitgelieferte Grafik.'}
+            {hint} {custom ? 'Eigenes Bild aktiv.' : 'Zeigt das mitgelieferte Bild.'}
           </p>
         </div>
         <form action={action} className="space-y-3">
@@ -365,7 +365,7 @@ export function ImageSlotCard({
               <ConfirmButton
                 className="btn min-h-[38px] px-3 text-[13px]"
                 title="Eigenes Bild entfernen?"
-                text="Danach erscheint wieder die mitgelieferte Grafik."
+                text="Danach erscheint wieder das mitgelieferte Bild."
                 confirmLabel="Entfernen"
                 danger
                 action={() => removeImageAction(slot)}

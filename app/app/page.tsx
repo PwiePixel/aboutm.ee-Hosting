@@ -3,7 +3,7 @@ import type { Metadata } from 'next'
 import Image from 'next/image'
 import Link from 'next/link'
 import { StatusBadge } from '@/components/world-header'
-import { imageUrl, isPixelArt, worldArt } from '@/lib/art'
+import { imageUrl, worldArt } from '@/lib/art'
 import { requireUser } from '@/lib/auth'
 import { config } from '@/lib/config'
 import { formatMiBAsGiB } from '@/lib/format'
@@ -41,7 +41,7 @@ export default async function WorldsPage({ searchParams }: { searchParams: Promi
             height={420}
             unoptimized
             priority
-            className={`block aspect-[16/9] w-full object-cover ${isPixelArt(hero) ? 'pixelated' : ''}`}
+            className="block aspect-[16/9] w-full object-cover"
           />
         </div>
         <p className="mt-8 text-[14px] text-ink-dim">{slotsLine}</p>
@@ -99,7 +99,7 @@ export default async function WorldsPage({ searchParams }: { searchParams: Promi
                     width={960}
                     height={320}
                     unoptimized
-                    className={`block aspect-[16/7] w-full object-cover ${isPixelArt(art) ? 'pixelated' : ''}`}
+                    className="block aspect-[16/7] w-full object-cover"
                   />
                   <span className="absolute right-3 top-3">
                     <StatusBadge status={world.status} />

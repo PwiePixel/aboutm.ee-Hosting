@@ -107,6 +107,18 @@ const MIGRATIONS: string[] = [
   INSERT OR IGNORE INTO stats (key, value)
   VALUES ('since', COALESCE((SELECT MIN(created_at) FROM users), CAST(strftime('%s', 'now') AS INTEGER) * 1000));
   `,
+  `
+  -- Jede Welt hat ihren eigenen Port auf dem Server und (bei eingerichteter DNS-Anbindung) einen SRV-Eintrag.
+  ALTER TABLE worlds ADD COLUMN port INTEGER;
+  ALTER TABLE worlds ADD COLUMN dns_record_id TEXT;
+  CREATE UNIQUE INDEX worlds_port ON worlds(port) WHERE port IS NOT NULL;
+
+  -- DNS-Einträge gelöschter Welten, die sich noch nicht entfernen ließen — werden später nachgeholt.
+  CREATE TABLE dns_cleanup (
+    record_id TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
+  );
+  `,
 ]
 
 type Globals = { __amDb?: Database.Database }

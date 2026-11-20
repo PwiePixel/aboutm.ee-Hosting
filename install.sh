@@ -4,21 +4,22 @@
 #
 #   sudo ./install.sh
 #
-# Das Skript installiert Docker, richtet Cloudflare ein (Tunnel für die Website, DNS für die
-# Minecraft-Adressen, Turnstile-Schlüssel), startet alles und legt dein Admin-Konto an.
+# Das Skript installiert Docker, richtet mit deinem Cloudflare-API-Token die DNS-Einträge und die
+# Turnstile-Schlüssel ein, startet alles und legt dein Admin-Konto an. Die Website läuft direkt über
+# diesen Server (HTTPS per Caddy). Jede Welt bekommt später ihren eigenen Port und — über dasselbe
+# API-Token — automatisch ihren eigenen SRV-Eintrag.
 # Es lässt sich gefahrlos erneut ausführen: Vorhandenes wird wiederverwendet, nicht doppelt angelegt.
 #
 # Ohne Rückfragen (z. B. für Automatisierung) über Umgebungsvariablen:
-#   AM_SITE_DOMAIN, AM_SERVER_DOMAIN, AM_ADMIN_EMAIL, AM_ADMIN_PASSWORD, AM_MODE (tunnel|caddy),
-#   AM_CF_API_TOKEN  oder  AM_TURNSTILE_SITE_KEY + AM_TURNSTILE_SECRET_KEY (+ AM_TUNNEL_TOKEN),
-#   AM_PUBLIC_IP, AM_DATA_PATH, AM_YES=1
+#   AM_SITE_DOMAIN, AM_SERVER_DOMAIN, AM_NODE_HOST, AM_ADMIN_EMAIL, AM_ADMIN_PASSWORD,
+#   AM_CF_API_TOKEN  oder  AM_TURNSTILE_SITE_KEY + AM_TURNSTILE_SECRET_KEY,
+#   AM_PUBLIC_IP, AM_DATA_PATH, AM_PORT_MIN, AM_PORT_MAX, AM_CADDY_TLS, AM_YES=1
 
 set -Eeuo pipefail
 
 REPO_URL="${AM_REPO_URL:-https://github.com/PwiePixel/aboutm.ee-Hosting.git}"
 INSTALL_DIR="${AM_INSTALL_DIR:-/opt/aboutmee}"
 CF_API="${AM_CF_API_BASE:-https://api.cloudflare.com/client/v4}"
-TUNNEL_NAME="${AM_TUNNEL_NAME:-aboutmee}"
 WIDGET_NAME="${AM_WIDGET_NAME:-aboutm.ee Hosting}"
 
 # ─────────────────────────── Ausgabe und Eingabe ───────────────────────────
@@ -104,7 +105,7 @@ env_value() { # env_value <Datei> <Schlüssel>
 }
 
 # Schlüssel, die dieses Skript in der .env selbst verwaltet. Alles andere bleibt unangetastet erhalten.
-MANAGED_KEYS='SITE_DOMAIN SITE_URL SERVER_DOMAIN COMPOSE_PROFILES TUNNEL_TOKEN CLIENT_IP_HEADER TURNSTILE_SITE_KEY TURNSTILE_SECRET_KEY DATA_PATH TOTAL_SLOTS AUTO_PAUSE_MINUTES MC_CPUS SUPPORT_EMAIL'
+MANAGED_KEYS='SITE_DOMAIN SITE_URL SERVER_DOMAIN NODE_HOST MC_PORT_MIN MC_PORT_MAX CLOUDFLARE_API_TOKEN CLOUDFLARE_ZONE_ID TURNSTILE_SITE_KEY TURNSTILE_SECRET_KEY CADDY_TLS DATA_PATH TOTAL_SLOTS AUTO_PAUSE_MINUTES MC_CPUS SUPPORT_EMAIL COMPOSE_PROFILES TUNNEL_TOKEN CLIENT_IP_HEADER'
 
 # Gibt alle Einstellungen einer .env aus, die dieses Skript nicht selbst verwaltet (z. B. Statistik-Schlüssel).
 env_extras() { # env_extras <Datei>
@@ -121,7 +122,7 @@ env_extras() { # env_extras <Datei>
 
 CF_HEADERS=''
 ZONE_STATUS=''
-TUNNEL_STATUS_PATH=''
+CLOUDFLARE_ZONE_ID=''
 
 # Ruft die Cloudflare-API auf und gibt die Antwort aus. Bricht mit der Meldung von Cloudflare ab,
 # wenn der Aufruf scheitert. Das Token steht nur in einer Datei, nie in der Prozessliste.
@@ -204,9 +205,9 @@ cf_dns_upsert() { # cf_dns_upsert <Typ> <Name> <Ziel> <proxied true|false> <Zone
   ok "DNS: $name → $content ersetzt"
 }
 
-# Richtet Tunnel, DNS und Turnstile über die API ein. Setzt TUNNEL_TOKEN, TURNSTILE_SITE_KEY, TURNSTILE_SECRET_KEY.
+# Richtet DNS und Turnstile über die API ein. Setzt CLOUDFLARE_ZONE_ID, TURNSTILE_SITE_KEY, TURNSTILE_SECRET_KEY.
 cloudflare_setup() {
-  local response tunnel_id widget
+  local response widget
   step "Cloudflare einrichten"
 
   # Persönliche Tokens lassen sich so vorab prüfen. Konto-Tokens kennen diesen Aufruf nicht —
@@ -216,65 +217,45 @@ cloudflare_setup() {
     ok "API-Token ist gültig"
   fi
 
+  # ── Website: über Cloudflare (orange Wolke), damit dessen Schutz davor liegt ──
   cf_find_zone "$SITE_DOMAIN"
   [[ -n "$ZONE_ID" ]] || die "Zu $SITE_DOMAIN gibt es in diesem Cloudflare-Konto keine Domain. Die Domain muss bei Cloudflare liegen und das Token muss sie lesen dürfen (Zone · Zone · Lesen)."
   ok "Domain gefunden: $ZONE_NAME"
   [[ "$ZONE_STATUS" == active ]] || warn "Die Domain ist bei Cloudflare noch nicht aktiv (Status: $ZONE_STATUS). Solange die Nameserver nicht umgestellt sind, ist die Website nicht erreichbar."
-  local site_zone="$ZONE_ID" below_zone="${SITE_DOMAIN%"$ZONE_NAME"}"
+  local site_zone="$ZONE_ID" site_account="$ACCOUNT_ID" below_zone="${SITE_DOMAIN%"$ZONE_NAME"}"
   below_zone="${below_zone%.}"
   if [[ "$below_zone" == *.* ]]; then
     warn "$SITE_DOMAIN liegt zwei Ebenen unter $ZONE_NAME. Dafür stellt Cloudflare kein kostenloses Zertifikat aus —"
     warn "nimm lieber eine Adresse direkt unter der Domain (z. B. hosting.$ZONE_NAME)."
   fi
+  cf_dns_upsert A "$SITE_DOMAIN" "$PUBLIC_IP" true "$site_zone"
 
-  # ── Tunnel für die Website ──
-  if [[ "$MODE" == tunnel ]]; then
-    response="$(cf GET "/accounts/$ACCOUNT_ID/cfd_tunnel?name=$TUNNEL_NAME&is_deleted=false")"
-    # Der Namensfilter der API kann auch ähnliche Namen liefern — deshalb hier genau vergleichen.
-    tunnel_id="$(jq -r --arg name "$TUNNEL_NAME" '[.result[] | select(.name == $name and .deleted_at == null)][0].id // empty' <<<"$response")"
-    if [[ -z "$tunnel_id" ]]; then
-      response="$(cf POST "/accounts/$ACCOUNT_ID/cfd_tunnel" "$(jq -n --arg name "$TUNNEL_NAME" '{name: $name, config_src: "cloudflare"}')")"
-      tunnel_id="$(jq -r '.result.id' <<<"$response")"
-      ok "Tunnel '$TUNNEL_NAME' angelegt"
-    else
-      ok "Tunnel '$TUNNEL_NAME' gibt es schon — wird weiterverwendet"
+  # Dieser Server verträgt die Cloudflare-Modi 'Flexible' und 'Full' ohne weiteres Zutun. Nur
+  # 'Full (strict)' verlangt ein öffentlich gültiges Zertifikat — dann holt Caddy eines von Let's Encrypt.
+  # Geändert wird der Modus hier nicht: Er gilt für die ganze Domain und damit auch für andere Seiten darauf.
+  if response="$(cf_try GET "/zones/$site_zone/settings/ssl")" && [[ "$(jq -r '.result.value // empty' <<<"$response")" == strict ]]; then
+    if [[ "$CADDY_TLS" == internal ]]; then
+      CADDY_TLS="$ADMIN_EMAIL"
+      note "Cloudflare steht auf 'Full (strict)' — Caddy holt deshalb ein Zertifikat von Let's Encrypt."
     fi
-    # Der Aufruf ersetzt die gesamte Weiterleitung des Tunnels. Leitet er schon andere Adressen weiter,
-    # gehört er vielleicht zu etwas anderem — dann erst fragen.
-    local other_hosts=''
-    if response="$(cf_try GET "/accounts/$ACCOUNT_ID/cfd_tunnel/$tunnel_id/configurations")"; then
-      other_hosts="$(jq -r --arg host "$SITE_DOMAIN" '[.result.config.ingress[]?.hostname // empty | select(. != $host)] | unique | join(", ")' <<<"$response")"
-    fi
-    if [[ -n "$other_hosts" ]]; then
-      warn "Der Tunnel '$TUNNEL_NAME' leitet bisher auch weiter: $other_hosts"
-      confirm "Diese Weiterleitungen entfernen und den Tunnel nur noch für $SITE_DOMAIN verwenden?" ||
-        die "Tunnel nicht geändert. Mit AM_TUNNEL_NAME=<anderer-name> legt das Skript einen eigenen Tunnel an."
-    fi
-    cf PUT "/accounts/$ACCOUNT_ID/cfd_tunnel/$tunnel_id/configurations" "$(jq -n --arg host "$SITE_DOMAIN" \
-      '{config: {ingress: [{hostname: $host, service: "http://web:3000"}, {service: "http_status:404"}]}}')" >/dev/null
-    ok "Tunnel leitet $SITE_DOMAIN an die Website"
-    response="$(cf GET "/accounts/$ACCOUNT_ID/cfd_tunnel/$tunnel_id/token")"
-    TUNNEL_TOKEN="$(jq -r '.result' <<<"$response")"
-    [[ -n "$TUNNEL_TOKEN" && "$TUNNEL_TOKEN" != null ]] || die "Cloudflare hat kein Tunnel-Token geliefert."
-    cf_dns_upsert CNAME "$SITE_DOMAIN" "$tunnel_id.cfargotunnel.com" true "$site_zone"
-    TUNNEL_STATUS_PATH="/accounts/$ACCOUNT_ID/cfd_tunnel/$tunnel_id"
-  else
-    cf_dns_upsert A "$SITE_DOMAIN" "$PUBLIC_IP" true "$site_zone"
   fi
 
-  # ── Minecraft-Adressen: direkt auf den Server, ohne Cloudflare-Proxy ──
+  # ── Minecraft: Adresse dieses Servers, ohne Cloudflare-Proxy (der leitet nur Webseiten durch) ──
   cf_find_zone "$SERVER_DOMAIN"
   [[ -n "$ZONE_ID" ]] || die "Zu $SERVER_DOMAIN gibt es in diesem Cloudflare-Konto keine Domain."
-  cf_dns_upsert A "*.$SERVER_DOMAIN" "$PUBLIC_IP" false "$ZONE_ID"
+  CLOUDFLARE_ZONE_ID="$ZONE_ID"
+  [[ "$NODE_HOST" == *".$ZONE_NAME" ]] || die "$NODE_HOST gehört nicht zur Domain $ZONE_NAME. Die Adresse des Servers muss in derselben Domain liegen wie die Welten."
+  cf_dns_upsert A "$NODE_HOST" "$PUBLIC_IP" false "$ZONE_ID"
+  note "Welten bekommen beim Anlegen automatisch einen SRV-Eintrag unter $SERVER_DOMAIN, der auf $NODE_HOST zeigt."
 
   # ── Turnstile ──
   if [[ -n "$TURNSTILE_SITE_KEY" && -n "$TURNSTILE_SECRET_KEY" ]]; then
     ok "Turnstile-Schlüssel aus der vorhandenen .env werden weiterverwendet"
     # Ein Widget gilt nur für die Adressen, die bei ihm eingetragen sind. Hat sich die Adresse der
     # Website geändert, muss sie dazu — sonst lehnt Turnstile dort jede Prüfung ab.
-    if widget="$(cf_try GET "/accounts/$ACCOUNT_ID/challenges/widgets/$TURNSTILE_SITE_KEY")"; then
+    if widget="$(cf_try GET "/accounts/$site_account/challenges/widgets/$TURNSTILE_SITE_KEY")"; then
       if [[ "$(jq -r --arg host "$SITE_DOMAIN" '[.result.domains[]? | select(. == $host)] | length' <<<"$widget")" -eq 0 ]]; then
-        if cf_try PUT "/accounts/$ACCOUNT_ID/challenges/widgets/$TURNSTILE_SITE_KEY" "$(jq -c --arg host "$SITE_DOMAIN" \
+        if cf_try PUT "/accounts/$site_account/challenges/widgets/$TURNSTILE_SITE_KEY" "$(jq -c --arg host "$SITE_DOMAIN" \
           '{name: .result.name, mode: .result.mode, domains: ((.result.domains // []) + [$host])}' <<<"$widget")" >/dev/null; then
           ok "Turnstile-Widget um $SITE_DOMAIN ergänzt"
         else
@@ -287,7 +268,7 @@ cloudflare_setup() {
   else
     # Turnstile lässt sich nur mit einem persönlichen Token anlegen (nicht mit einem Konto-Token) und
     # braucht die Berechtigung Konto · Turnstile · Bearbeiten. Klappt es nicht, wird nach den Schlüsseln gefragt.
-    if widget="$(cf_try POST "/accounts/$ACCOUNT_ID/challenges/widgets" "$(jq -n --arg name "$WIDGET_NAME" --arg domain "$SITE_DOMAIN" \
+    if widget="$(cf_try POST "/accounts/$site_account/challenges/widgets" "$(jq -n --arg name "$WIDGET_NAME" --arg domain "$SITE_DOMAIN" \
       '{name: $name, domains: [$domain], mode: "managed"}')")"; then
       TURNSTILE_SITE_KEY="$(jq -r '.result.sitekey // empty' <<<"$widget")"
       TURNSTILE_SECRET_KEY="$(jq -r '.result.secret // empty' <<<"$widget")"
@@ -372,13 +353,28 @@ main() {
 
   SERVER_DOMAIN="${AM_SERVER_DOMAIN:-}"
   if [[ -z "$SERVER_DOMAIN" ]]; then
-    note "Welten bekommen Adressen wie mc-abc123.<Domain>. Dafür wird der Platzhalter-Eintrag *.<Domain> angelegt."
+    note "Welten bekommen Adressen wie mc-abc123.<Domain>."
     local server_default
     server_default="$(env_value "$env_file" SERVER_DOMAIN)"
     ask SERVER_DOMAIN "Unter welcher Domain sollen die Welten erreichbar sein?" "${server_default:-$SITE_DOMAIN}"
   fi
   SERVER_DOMAIN="${SERVER_DOMAIN,,}"
   is_domain "$SERVER_DOMAIN" || die "'$SERVER_DOMAIN' ist keine gültige Domain."
+
+  # Adresse dieses Servers für Minecraft-Verbindungen. Auf sie zeigen die SRV-Einträge der Welten.
+  NODE_HOST="${AM_NODE_HOST:-$(env_value "$env_file" NODE_HOST)}"
+  NODE_HOST="${NODE_HOST:-node.$SERVER_DOMAIN}"
+  NODE_HOST="${NODE_HOST,,}"
+  is_domain "$NODE_HOST" || die "'$NODE_HOST' ist kein gültiger Hostname."
+  [[ "$NODE_HOST" != "$SITE_DOMAIN" ]] || die "Die Adresse des Servers ($NODE_HOST) darf nicht dieselbe sein wie die der Website — die Website läuft über Cloudflare, Minecraft nicht."
+
+  PORT_MIN="${AM_PORT_MIN:-$(env_value "$env_file" MC_PORT_MIN)}"
+  PORT_MAX="${AM_PORT_MAX:-$(env_value "$env_file" MC_PORT_MAX)}"
+  PORT_MIN="${PORT_MIN:-25600}"
+  PORT_MAX="${PORT_MAX:-26599}"
+  if ! [[ "$PORT_MIN" =~ ^[0-9]+$ && "$PORT_MAX" =~ ^[0-9]+$ ]] || ((PORT_MIN < 1024 || PORT_MAX > 65535 || PORT_MIN > PORT_MAX)); then
+    die "Der Portbereich für Welten ist ungültig ($PORT_MIN–$PORT_MAX)."
+  fi
 
   ADMIN_EMAIL="${AM_ADMIN_EMAIL:-}"
   [[ -n "$ADMIN_EMAIL" ]] || ask ADMIN_EMAIL "Deine E-Mail-Adresse für das Admin-Konto" ''
@@ -389,19 +385,24 @@ main() {
   DATA_PATH="${DATA_PATH:-/srv/aboutmee/data}"
   [[ "$DATA_PATH" == /* ]] || die "DATA_PATH muss ein absoluter Pfad sein."
 
-  MODE="${AM_MODE:-$(env_value "$env_file" COMPOSE_PROFILES)}"
-  TUNNEL_TOKEN="${AM_TUNNEL_TOKEN:-$(env_value "$env_file" TUNNEL_TOKEN)}"
+  # internal = Caddy erzeugt sein Zertifikat selbst (passt hinter Cloudflare); eine E-Mail-Adresse = Let's Encrypt
+  CADDY_TLS="${AM_CADDY_TLS:-$(env_value "$env_file" CADDY_TLS)}"
+  CADDY_TLS="${CADDY_TLS:-internal}"
+
   TURNSTILE_SITE_KEY="${AM_TURNSTILE_SITE_KEY:-$(env_value "$env_file" TURNSTILE_SITE_KEY)}"
   TURNSTILE_SECRET_KEY="${AM_TURNSTILE_SECRET_KEY:-$(env_value "$env_file" TURNSTILE_SECRET_KEY)}"
 
-  local cf_token="${AM_CF_API_TOKEN:-}"
+  # Das API-Token bleibt auf dem Server gespeichert: Die Website legt damit für jede neue Welt einen
+  # SRV-Eintrag an. Bei einem erneuten Lauf wird das gespeicherte Token weiterverwendet.
+  local cf_token="${AM_CF_API_TOKEN:-$(env_value "$env_file" CLOUDFLARE_API_TOKEN)}"
   if [[ -z "$cf_token" && "${AM_YES:-}" != 1 ]]; then
-    printf '\n  Mit einem Cloudflare-API-Token richtet das Skript Tunnel, DNS und die Sicherheitsprüfung selbst ein.\n'
+    printf '\n  Mit einem Cloudflare-API-Token richtet das Skript DNS und Sicherheitsprüfung selbst ein, und die Website\n'
+    printf '  legt später für jede neue Welt automatisch einen SRV-Eintrag an. Das Token wird dafür auf diesem Server\n'
+    printf '  gespeichert (in .env, nur für root lesbar).\n\n'
     printf '  Token anlegen: Cloudflare-Dashboard → Mein Profil → API-Token → Token erstellen → Benutzerdefiniert, mit:\n'
-    printf '    Konto  · Cloudflare Tunnel · Bearbeiten\n'
-    printf '    Konto  · Turnstile         · Bearbeiten\n'
     printf '    Zone   · DNS               · Bearbeiten   (für deine Domain)\n'
     printf '    Zone   · Zone              · Lesen        (für deine Domain)\n'
+    printf '    Konto  · Turnstile         · Bearbeiten\n'
     ask_secret cf_token "API-Token einfügen (Eingabe bleibt unsichtbar; leer lassen, um alles von Hand einzutragen)"
   fi
 
@@ -415,14 +416,6 @@ main() {
 
   # ── 5. Cloudflare ──
   if [[ -n "$cf_token" ]]; then
-    # Lief die Website bisher direkt über diesen Server, nicht stillschweigend dabei bleiben:
-    # Mit dem API-Token kann das Skript jetzt den Tunnel einrichten.
-    if [[ -z "${AM_MODE:-}" && "$MODE" == caddy ]] &&
-      confirm "Bisher läuft die Website direkt über diesen Server (Caddy). Auf den Cloudflare-Tunnel umstellen?"; then
-      MODE=tunnel
-    fi
-    MODE="${MODE:-tunnel}"
-    [[ "$MODE" == tunnel || "$MODE" == caddy ]] || die "Die Betriebsart muss tunnel oder caddy sein (AM_MODE oder COMPOSE_PROFILES in .env)."
     CF_HEADERS="$WORK_DIR/cf-headers"
     (umask 077 && printf 'Authorization: Bearer %s\n' "$cf_token" >"$CF_HEADERS")
     cloudflare_setup
@@ -434,22 +427,10 @@ main() {
       ask_secret TURNSTILE_SECRET_KEY "Turnstile Secret Key"
     fi
     [[ -n "$TURNSTILE_SITE_KEY" && -n "$TURNSTILE_SECRET_KEY" ]] || die "Ohne Turnstile-Schlüssel gäbe es keine Sicherheitsprüfung. Bitte beide Schlüssel angeben."
-    if [[ -z "$MODE" ]]; then
-      if [[ -z "$TUNNEL_TOKEN" && "${AM_YES:-}" != 1 ]]; then
-        note "Für einen Cloudflare-Tunnel: Zero Trust → Netzwerke → Tunnel → erstellen, öffentlichen Hostnamen"
-        note "$SITE_DOMAIN auf http://web:3000 legen und das Token hier einfügen. Leer lassen = HTTPS direkt über diesen Server."
-        ask_secret TUNNEL_TOKEN "Tunnel-Token (optional)"
-      fi
-      if [[ -n "$TUNNEL_TOKEN" ]]; then MODE=tunnel; else MODE=caddy; fi
-    fi
-    [[ "$MODE" == tunnel || "$MODE" == caddy ]] || die "Die Betriebsart muss tunnel oder caddy sein (AM_MODE oder COMPOSE_PROFILES in .env)."
-    if [[ "$MODE" == tunnel && -z "$TUNNEL_TOKEN" ]]; then
-      note "Für den Tunnel fehlt das Token: Zero Trust → Netzwerke → Tunnel → deinen Tunnel öffnen → Token kopieren."
-      ask_secret TUNNEL_TOKEN "Tunnel-Token"
-      [[ -n "$TUNNEL_TOKEN" ]] || die "Ohne Tunnel-Token geht die Betriebsart tunnel nicht. Mit AM_MODE=caddy läuft die Website direkt über diesen Server."
-    fi
-    warn "DNS bitte selbst eintragen:  *.$SERVER_DOMAIN  →  A  $PUBLIC_IP  (nur DNS, graue Wolke)"
-    [[ "$MODE" == caddy ]] && warn "und:  $SITE_DOMAIN  →  A  $PUBLIC_IP"
+    warn "Ohne API-Token bitte selbst eintragen:"
+    warn "  $SITE_DOMAIN  →  A  $PUBLIC_IP  (mit Cloudflare-Proxy, orange Wolke)"
+    warn "  $NODE_HOST  →  A  $PUBLIC_IP  (nur DNS, graue Wolke)"
+    warn "Welten haben dann keine eigene Adresse; Spieler verbinden sich über $NODE_HOST:<Port>."
   fi
 
   # ── 6. Einstellungen schreiben ──
@@ -466,8 +447,8 @@ main() {
     cp -p "$env_file" "$env_file.bak"
     chmod 600 "$env_file.bak" # enthält dieselben Geheimnisse wie die .env
   fi
-  local ip_header=cf-connecting-ip
-  [[ "$MODE" == caddy ]] && ip_header=x-real-ip
+  # Ohne Zone kann die Website keine Einträge anlegen — dann das Token gar nicht erst ablegen.
+  [[ -n "$CLOUDFLARE_ZONE_ID" ]] || cf_token=''
   (
     umask 077
     cat >"$env_file" <<EOF
@@ -476,14 +457,20 @@ SITE_DOMAIN=$SITE_DOMAIN
 SITE_URL=https://$SITE_DOMAIN
 SERVER_DOMAIN=$SERVER_DOMAIN
 
-# tunnel = Website über Cloudflare-Tunnel, caddy = HTTPS direkt über diesen Server
-COMPOSE_PROFILES=$MODE
-TUNNEL_TOKEN=$TUNNEL_TOKEN
-# Kopfzeile mit der Adresse des Besuchers — gesetzt vom Tunnel bzw. von Caddy
-CLIENT_IP_HEADER=$ip_header
+# Adresse dieses Servers für Minecraft und der Portbereich, aus dem jede Welt ihren Port bekommt
+NODE_HOST=$NODE_HOST
+MC_PORT_MIN=$PORT_MIN
+MC_PORT_MAX=$PORT_MAX
+
+# Cloudflare-Zugang, mit dem die Website je Welt einen SRV-Eintrag anlegt und wieder löscht
+CLOUDFLARE_API_TOKEN=$cf_token
+CLOUDFLARE_ZONE_ID=$CLOUDFLARE_ZONE_ID
 
 TURNSTILE_SITE_KEY=$TURNSTILE_SITE_KEY
 TURNSTILE_SECRET_KEY=$TURNSTILE_SECRET_KEY
+
+# Zertifikat des Servers: internal (hinter Cloudflare) oder eine E-Mail-Adresse für Let's Encrypt
+CADDY_TLS=$CADDY_TLS
 
 DATA_PATH=$DATA_PATH
 TOTAL_SLOTS=${total_slots:-20}
@@ -501,29 +488,22 @@ EOF
   # ── 7. Firewall ──
   if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
     step "Firewall"
-    ufw allow 25565/tcp >/dev/null
-    ok "Port 25565 (Minecraft) geöffnet"
-    if [[ "$MODE" == caddy ]]; then
-      ufw allow 80/tcp >/dev/null
-      ufw allow 443/tcp >/dev/null
-      ok "Ports 80 und 443 (Website) geöffnet"
-    fi
+    ufw allow 80/tcp >/dev/null
+    ufw allow 443/tcp >/dev/null
+    ok "Ports 80 und 443 (Website) geöffnet"
+    ufw allow "$PORT_MIN:$PORT_MAX/tcp" >/dev/null
+    ok "Ports $PORT_MIN–$PORT_MAX (Minecraft-Welten) geöffnet"
   else
-    note "Keine aktive ufw-Firewall gefunden. Falls dein Anbieter eine eigene Firewall hat: Port 25565/TCP freigeben$([[ "$MODE" == caddy ]] && printf ' sowie 80 und 443')."
+    note "Keine aktive ufw-Firewall gefunden. Falls dein Anbieter eine eigene Firewall hat, dort freigeben: 80 und 443 (Website) sowie $PORT_MIN–$PORT_MAX/TCP (Minecraft-Welten)."
   fi
 
   # ── 8. Starten ──
   step "Website bauen und starten (das dauert beim ersten Mal ein paar Minuten)"
-  # Beim Wechsel zwischen Tunnel und Caddy den jeweils anderen Dienst abräumen.
-  if [[ "$MODE" == tunnel ]]; then
-    docker compose --profile caddy rm --stop --force caddy >/dev/null 2>&1 || true
-  else
-    docker compose --profile tunnel rm --stop --force tunnel >/dev/null 2>&1 || true
-  fi
-  # Erst nur die Website und den Minecraft-Router starten — noch ohne Tunnel oder Caddy. So ist die
-  # Seite von außen nicht erreichbar, bis das Admin-Konto steht, und niemand kann sich vorher unter
-  # deiner Adresse registrieren.
-  docker compose up -d --build web router
+  # Dienste aus früheren Ständen (Tunnel, Minecraft-Router) abräumen — sie werden nicht mehr gebraucht.
+  docker rm --force "$(basename "$INSTALL_DIR" | tr '[:upper:]' '[:lower:]')-tunnel-1" "$(basename "$INSTALL_DIR" | tr '[:upper:]' '[:lower:]')-router-1" >/dev/null 2>&1 || true
+  # Erst nur die Website starten — noch ohne Caddy. So ist die Seite von außen nicht erreichbar, bis das
+  # Admin-Konto steht, und niemand kann sich vorher unter deiner Adresse registrieren.
+  docker compose up -d --build web
   local waited=0
   until docker compose exec -T web node -e "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; do
     waited=$((waited + 3))
@@ -555,24 +535,7 @@ EOF
   # ── 10. Öffentlich schalten ──
   step "Website öffentlich schalten"
   docker compose up -d --remove-orphans
-  ok "$([[ "$MODE" == tunnel ]] && printf 'Cloudflare-Tunnel gestartet' || printf 'Caddy gestartet (HTTPS-Zertifikat wird beim ersten Aufruf geholt)')"
-
-  if [[ -n "$TUNNEL_STATUS_PATH" ]]; then
-    local tunnel_state='' tunnel_waited=0 tunnel_response
-    while ((tunnel_waited < 60)); do
-      if tunnel_response="$(cf_try GET "$TUNNEL_STATUS_PATH")"; then
-        tunnel_state="$(jq -r '.result.status // empty' <<<"$tunnel_response")"
-        [[ "$tunnel_state" == healthy ]] && break
-      fi
-      tunnel_waited=$((tunnel_waited + 5))
-      sleep 5
-    done
-    if [[ "$tunnel_state" == healthy ]]; then
-      ok "Tunnel ist verbunden — https://$SITE_DOMAIN ist erreichbar"
-    else
-      warn "Der Tunnel meldet noch keine Verbindung (Status: ${tunnel_state:-unbekannt}). Der Server muss Cloudflare ausgehend auf Port 7844 erreichen. Logs: docker compose logs tunnel"
-    fi
-  fi
+  ok "Caddy gestartet — https://$SITE_DOMAIN ist jetzt über Cloudflare erreichbar"
 
   step "Minecraft-Images vorab laden (damit der erste Start einer Welt schnell geht)"
   local image
@@ -594,10 +557,14 @@ EOF
   else
     printf '  Passwort:     dein bisheriges (das Konto gab es schon)\n'
   fi
-  printf '  Welten:       mc-….%s (Port 25565)\n\n' "$SERVER_DOMAIN"
+  if [[ -n "$cf_token" ]]; then
+    printf '  Welten:       mc-….%s — jede bekommt automatisch ihren SRV-Eintrag\n\n' "$SERVER_DOMAIN"
+  else
+    printf '  Welten:       %s:<Port>\n\n' "$NODE_HOST"
+  fi
   printf '  Noch zu tun:\n'
   printf '   • Impressum und Datenschutz ausfüllen (app/(site)/impressum und …/datenschutz), danach: docker compose up -d --build\n'
-  printf '   • Im Cloudflare-Dashboard unter SSL/TLS den Modus „Full“ wählen%s\n' "$([[ "$MODE" == tunnel ]] && printf ' (beim Tunnel nicht nötig)')"
+  printf '   • Eigene Bilder hochladen: https://%s/admin/bilder\n' "$SITE_DOMAIN"
   printf '   • Den Ordner %s regelmäßig extern sichern\n\n' "$DATA_PATH"
   printf '  Aktualisieren: cd %s && git pull && sudo ./install.sh\n' "$INSTALL_DIR"
 }

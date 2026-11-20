@@ -70,13 +70,29 @@ describe('Docker-Treiber', () => {
     expect(spec.HostConfig).toMatchObject({ CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges'], RestartPolicy: { Name: 'no' } })
     expect(spec.HostConfig.Memory).toBe(2560 * 1024 * 1024)
     expect(spec.Env).toEqual(expect.arrayContaining(['EULA=TRUE', 'TYPE=PAPER', 'VERSION=26.3', 'ONLINE_MODE=true']))
-    // Die Paper-Konfiguration verlangt das PROXY-Protokoll, damit der Server echte Spieleradressen sieht.
-    const paper = fs.readFileSync(path.join(process.env.DATA_DIR!, 'worlds', world.id, 'config', 'paper-global.yml'), 'utf8')
-    expect(paper).toMatch(/^proxies:\n {2}proxy-protocol: true$/m)
+    // Jede Welt ist über ihren eigenen Port erreichbar; im Container bleibt es bei 25565.
+    const port = lib.getWorld(world.user_id, world.id)!.port
+    expect(port).toBeGreaterThanOrEqual(25600)
+    expect(spec.HostConfig.PortBindings).toEqual({ '25565/tcp': [{ HostPort: String(port) }] })
+    expect(spec.Env).toContain('SERVER_PORT=25565')
 
     await lib.requestStop(world)
     await ticksUntil(world, 'paused')
     expect(container(world)).toBeUndefined() // nach dem Stoppen wird der Container entfernt
+  })
+
+  it('stellt vor dem Start sicher, dass Paper direkte Verbindungen annimmt', async () => {
+    const world = newWorld()
+    const configDir = path.join(process.env.DATA_DIR!, 'worlds', world.id, 'config')
+    fs.mkdirSync(configDir, { recursive: true })
+    fs.writeFileSync(path.join(configDir, 'paper-global.yml'), 'proxies:\n  bungee-cord:\n    online-mode: true\n  proxy-protocol: true\n  velocity:\n    enabled: false\n')
+    await lib.requestStart(world)
+    expect(fs.readFileSync(path.join(configDir, 'paper-global.yml'), 'utf8')).toBe(
+      'proxies:\n  bungee-cord:\n    online-mode: true\n  proxy-protocol: false\n  velocity:\n    enabled: false\n',
+    )
+    await ticksUntil(world, 'online')
+    await lib.requestStop(world)
+    await ticksUntil(world, 'paused')
   })
 
   it('bricht den Start ab, wenn währenddessen pausiert wird — statt hängen zu bleiben', async () => {

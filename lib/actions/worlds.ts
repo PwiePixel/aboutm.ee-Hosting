@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache'
 import { notFound, redirect } from 'next/navigation'
 import { requireUser } from '../auth'
+import { ensureWorldRecord } from '../dns'
 import { allowAttempt } from '../ratelimit'
 import {
   SEED_MAX,
@@ -95,6 +96,11 @@ export async function createWorldAction(_previous: ActionState, formData: FormDa
     console.error('[aboutm.ee] Welt anlegen:', error)
     return { error: UNEXPECTED, values }
   }
+  // Gleich die eigene Adresse einrichten. Klappt das gerade nicht, holt der Taktgeber es nach —
+  // bis dahin ist die Welt über die Adresse des Servers mit ihrem Port erreichbar.
+  await ensureWorldRecord(world).catch((error: unknown) =>
+    console.error(`[aboutm.ee] DNS-Eintrag für ${world.id}:`, error instanceof Error ? error.message : error),
+  )
   revalidatePath('/app')
   redirect(`/app/welten/${world.id}?neu=1`)
 }

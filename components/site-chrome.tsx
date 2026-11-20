@@ -61,9 +61,6 @@ export function SiteFooter() {
           <Link href="/datenschutz" className="hover:text-ink">
             Datenschutz
           </Link>
-          <Link href="/bildnachweise" className="hover:text-ink">
-            Bildnachweise
-          </Link>
         </nav>
         <Disclaimer className="mt-6 max-w-[680px]" />
       </div>

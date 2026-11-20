@@ -3,6 +3,7 @@ import { config } from './config'
 import { db } from './db'
 import { directorySize } from './files'
 import { newWorldId, randomId } from './ids'
+import { removeRecord } from './dns'
 import { isLocked } from './locks'
 import { backupsDir, worldDir } from './paths'
 import { runtime } from './runtime'
@@ -19,8 +20,36 @@ export class WorldError extends Error {}
 const ACTIVE: WorldStatus[] = ['starting', 'online', 'stopping']
 const BUSY: WorldStatus[] = ['queued', ...ACTIVE]
 
-export function worldAddress(world: Pick<World, 'host_label'>): string {
-  return `${world.host_label}.${config.serverDomain}`
+/**
+ * Die Adresse, die Spieler in Minecraft eintragen. Mit SRV-Eintrag ist das der eigene Name der Welt;
+ * solange es (noch) keinen gibt, die Adresse des Servers mit dem Port der Welt.
+ */
+export function worldAddress(world: Pick<World, 'host_label' | 'port' | 'dns_record_id'>): string {
+  const named = `${world.host_label}.${config.serverDomain}`
+  if (world.dns_record_id || world.port === null || runtime().preview) return named
+  return `${config.nodeHost}:${world.port}`
+}
+
+/** Der niedrigste freie Port aus dem Bereich für Welten. */
+function freePort(): number {
+  const taken = new Set(
+    (db().prepare('SELECT port FROM worlds WHERE port IS NOT NULL').all() as Array<{ port: number }>).map((row) => row.port),
+  )
+  for (let port = config.portMin; port <= config.portMax; port++) {
+    if (!taken.has(port)) return port
+  }
+  throw new WorldError('Im Moment sind alle Server-Adressen vergeben. Bitte versuch es später noch einmal.')
+}
+
+/** Welten aus älteren Ständen haben noch keinen Port — er wird beim ersten Start vergeben. */
+function withPort(world: World): World {
+  if (world.port !== null) return world
+  const port = db().transaction(() => {
+    const next = freePort()
+    db().prepare('UPDATE worlds SET port = ? WHERE id = ?').run(next, world.id)
+    return next
+  })()
+  return { ...world, port }
 }
 
 // ───────────────────────── Lesen ─────────────────────────
@@ -95,8 +124,8 @@ export function createWorld(userId: string, input: NewWorld): World {
     db()
       .prepare(
         `INSERT INTO worlds (id, user_id, name, host_label, version, paper_build, gamemode, difficulty, seed,
-                             whitelist_enabled, status, status_since, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paused', ?, ?)`,
+                             whitelist_enabled, status, status_since, created_at, port)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paused', ?, ?, ?)`,
       )
       .run(
         id,
@@ -111,6 +140,7 @@ export function createWorld(userId: string, input: NewWorld): World {
         input.whitelist ? 1 : 0,
         now,
         now,
+        freePort(),
       )
     recordWorldCreated(now)
     return id
@@ -137,8 +167,11 @@ export function changeVersion(world: World, versionId: string): void {
 export async function deleteWorld(world: World): Promise<void> {
   // Erst den Server samt Container wegnehmen — sonst würden einem laufenden Server die Dateien
   // unter den Füßen gelöscht, und der Container bliebe zurück.
-  await runtime().destroy(reload(world))
+  const current = reload(world)
+  await runtime().destroy(current)
   db().prepare('DELETE FROM worlds WHERE id = ?').run(world.id)
+  // Der SRV-Eintrag muss mit weg — der Port wird neu vergeben und zeigte sonst auf eine fremde Welt.
+  if (current.dns_record_id) await removeRecord(current.dns_record_id)
   removeTree(worldDir(world.id))
   removeTree(backupsDir(world.id))
 }
@@ -222,7 +255,7 @@ export function writeManagedFiles(world: World): void {
     dir.replaceFile('server.properties', `${lines.join('\n')}\n`, SERVER_OWNER)
     dir.replaceFile('eula.txt', 'eula=true\n', SERVER_OWNER)
 
-    if (!runtime().preview) enforceProxyProtocol(dir)
+    disableProxyProtocol(dir)
   })
 }
 
@@ -240,31 +273,23 @@ function readManagedText(dir: Dir, name: string): string | null {
 }
 
 /**
- * Spieler verbinden sich über den Router. Damit der Server trotzdem ihre echten Adressen sieht
- * (sonst kämen alle von derselben — mit Drosselung beim gleichzeitigen Beitreten und IP-Sperren, die
- * alle treffen), spricht der Router das PROXY-Protokoll. Paper muss dafür `proxy-protocol: true` haben.
+ * Spieler verbinden sich direkt mit dem Server der Welt. Steht in der Paper-Konfiguration
+ * `proxy-protocol: true`, erwartet er stattdessen einen vorgeschalteten Proxy und weist alle
+ * direkten Verbindungen ab — die Einstellung wird deshalb vor jedem Start zurückgesetzt.
  */
-function enforceProxyProtocol(root: Dir): void {
-  const existing = root.lstat('config')
-  if (existing && !existing.isDirectory()) root.remove('config')
-  if (!root.lstat('config')) root.mkdir('config', SERVER_OWNER)
-
-  const dir = root.openDir('config')
+function disableProxyProtocol(root: Dir): void {
+  if (!root.lstat('config')?.isDirectory()) return
+  let dir: Dir
+  try {
+    dir = root.openDir('config')
+  } catch {
+    return
+  }
   try {
     const name = 'paper-global.yml'
     const current = readManagedText(dir, name)
-    let next: string
-    if (current === null) {
-      // Paper ergänzt beim Start alle übrigen Einstellungen selbst.
-      next = 'proxies:\n  proxy-protocol: true\n'
-    } else if (/^[ \t]+proxy-protocol:.*$/m.test(current)) {
-      next = current.replace(/^([ \t]+)proxy-protocol:.*$/m, '$1proxy-protocol: true')
-    } else if (/^proxies:[ \t]*$/m.test(current)) {
-      next = current.replace(/^proxies:[ \t]*$/m, 'proxies:\n  proxy-protocol: true')
-    } else {
-      next = `${current.replace(/\n*$/, '\n')}proxies:\n  proxy-protocol: true\n`
-    }
-    if (next !== current) dir.replaceFile(name, next, SERVER_OWNER)
+    if (current === null || !/^[ \t]+proxy-protocol:[ \t]*true[ \t]*$/m.test(current)) return
+    dir.replaceFile(name, current.replace(/^([ \t]+)proxy-protocol:.*$/m, '$1proxy-protocol: false'), SERVER_OWNER)
   } finally {
     dir.close()
   }
@@ -280,7 +305,8 @@ function setStatus(world: World, status: WorldStatus, extra: Partial<World> = {}
     .run(...keys.map((key) => fields[key] as string | number | null), world.id)
 }
 
-async function launch(world: World): Promise<void> {
+async function launch(original: World): Promise<void> {
+  const world = withPort(original)
   // Sofort als „startet“ vermerken — ohne Wartepunkt davor. So sieht jede gleichzeitige Anfrage
   // die Welt und ihren Serverplatz schon als belegt.
   setStatus(world, 'starting', { queued_at: null, restart_pending: 0, pause_reason: null })

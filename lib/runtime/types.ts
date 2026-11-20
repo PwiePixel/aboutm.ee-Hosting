@@ -23,6 +23,10 @@ export type World = {
   /** Gemessene Spielzeit: Summe über alle Spieler, in Millisekunden. */
   play_ms: number
   starts: number
+  /** Port auf dem Server, unter dem die Welt von außen erreichbar ist. */
+  port: number | null
+  /** Kennung des SRV-Eintrags bei Cloudflare — `null`, solange er (noch) nicht angelegt ist. */
+  dns_record_id: string | null
 }
 
 /** Was der Treiber über den tatsächlichen Prozess weiß. */

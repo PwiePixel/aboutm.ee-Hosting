@@ -1,8 +1,8 @@
 import { ChevronLeft } from 'lucide-react'
-import Image from 'next/image'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import type { ReactNode } from 'react'
+import { Cover } from '@/components/cover'
 import { CopyAddress, LiveError, LiveStatusBadge, QuickControl, WorldTabs } from '@/components/world-header'
 import { WorldLiveProvider } from '@/components/world-live'
 import { worldArt } from '@/lib/art'
@@ -32,15 +32,7 @@ export default async function WorldLayout({
       </Link>
 
       <div className="relative mt-4 overflow-hidden border border-line">
-        <Image
-          src={art}
-          alt=""
-          width={960}
-          height={320}
-          unoptimized
-          priority
-          className="block h-[220px] w-full object-cover sm:h-[300px]"
-        />
+        <Cover src={art} priority className="h-[220px] w-full sm:h-[300px]" />
         <div className="absolute inset-0 bg-gradient-to-t from-base/90 via-base/20 to-transparent" />
         <span className="absolute right-4 top-4">
           <LiveStatusBadge />

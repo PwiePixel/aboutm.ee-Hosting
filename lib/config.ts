@@ -10,6 +10,23 @@ export const config = {
   siteUrl: (process.env.SITE_URL ?? 'http://localhost:3000').replace(/\/+$/, ''),
   /** Welten sind unter <kennung>.<serverDomain> erreichbar. */
   serverDomain: process.env.SERVER_DOMAIN ?? 'aboutm.ee',
+  /**
+   * Hostname dieses Servers für Minecraft-Verbindungen (A-Eintrag auf seine öffentliche Adresse, ohne
+   * Cloudflare-Proxy). Die SRV-Einträge der Welten zeigen hierhin.
+   */
+  nodeHost: process.env.NODE_HOST ?? `node.${process.env.SERVER_DOMAIN ?? 'aboutm.ee'}`,
+  /** Aus diesem Bereich bekommt jede Welt beim Anlegen ihren festen Port. */
+  portMin: int(process.env.MC_PORT_MIN, 25600),
+  portMax: int(process.env.MC_PORT_MAX, 26599),
+  /**
+   * Zugang zur Cloudflare-API, um je Welt einen SRV-Eintrag anzulegen. Fehlt er, gibt es keine
+   * eigenen Adressen — dann verbindet man sich über <nodeHost>:<port>.
+   */
+  cloudflare: {
+    token: process.env.CLOUDFLARE_API_TOKEN ?? '',
+    zoneId: process.env.CLOUDFLARE_ZONE_ID ?? '',
+    api: (process.env.CLOUDFLARE_API_BASE ?? 'https://api.cloudflare.com/client/v4').replace(/\/+$/, ''),
+  },
   supportEmail: process.env.SUPPORT_EMAIL ?? '',
 
   /**
@@ -58,7 +75,7 @@ export const config = {
 
   /**
    * Kopfzeile, aus der die Adresse des Besuchers gelesen wird. Sie muss von einer Stelle gesetzt sein,
-   * der wir trauen: hinter dem Cloudflare-Tunnel „cf-connecting-ip“, hinter Caddy „x-real-ip“.
+   * der wir trauen: Caddy setzt „x-real-ip“ (siehe Caddyfile und docker-compose.yml).
    */
   clientIpHeader: (process.env.CLIENT_IP_HEADER ?? 'cf-connecting-ip').toLowerCase(),
 

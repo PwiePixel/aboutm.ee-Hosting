@@ -1,6 +1,6 @@
 import { ArrowRight, Check, Plus } from 'lucide-react'
-import Image from 'next/image'
 import Link from 'next/link'
+import { Cover } from '@/components/cover'
 import { imageUrl } from '@/lib/art'
 import { currentUser } from '@/lib/auth'
 import { config } from '@/lib/config'
@@ -108,18 +108,12 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
           </ul>
         </div>
 
-        <div className="mt-12 border border-line">
-          <Image
-            src={hero}
-            alt="Minecraft-Landschaft: eine ruhige Bucht mit bewaldeter Küste unter blauem Himmel"
-            width={960}
-            height={420}
-            priority
-            unoptimized
-            className="block aspect-[16/7] w-full object-cover"
-          />
-        </div>
-        <p className="mt-4 text-center text-[14px] text-ink-dim" aria-live="polite">
+        {hero && (
+          <div className="mt-12 border border-line">
+            <Cover src={hero} priority className="aspect-[16/7] w-full" />
+          </div>
+        )}
+        <p className={`${hero ? 'mt-4 text-center' : 'mt-10'} text-[14px] text-ink-dim`} aria-live="polite">
           Gerade {free === 1 ? 'ist' : 'sind'} <strong className="text-ink">{free}</strong> von {limit.totalSlots}{' '}
           Serverplätzen frei.
         </p>

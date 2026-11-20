@@ -1,6 +1,7 @@
 import { autoBackupAfterPause } from './backups'
 import { config, turnstileEnabled } from './config'
 import { db } from './db'
+import { dnsEnabled, dnsMaintenance } from './dns'
 import { runtime } from './runtime'
 import { limits } from './settings'
 import { tick } from './worlds'
@@ -15,6 +16,13 @@ export function startScheduler(): void {
 
   const driver = runtime()
   console.log(`[aboutm.ee] Treiber: ${driver.name} · ${limits().totalSlots} Serverplätze · Daten in ${config.dataDir}`)
+  if (!driver.preview) {
+    console.log(
+      dnsEnabled()
+        ? `[aboutm.ee] Adressen: SRV-Einträge unter ${config.serverDomain} → ${config.nodeHost}, Ports ${config.portMin}–${config.portMax}`
+        : `[aboutm.ee] Adressen: ${config.nodeHost}:<Port> (keine Cloudflare-Anbindung eingerichtet), Ports ${config.portMin}–${config.portMax}`,
+    )
+  }
   if (driver.preview) {
     console.warn('[aboutm.ee] Vorschau-Modus: Es werden keine echten Minecraft-Server gestartet.')
   }
@@ -43,5 +51,12 @@ export function startScheduler(): void {
     60 * 60 * 1000,
   )
   cleanup.unref()
+
+  // SRV-Einträge nachziehen, die beim ersten Versuch nicht angelegt oder entfernt werden konnten.
+  const dns = setInterval(
+    () => void dnsMaintenance().catch((error) => console.error('[aboutm.ee] DNS-Pflege:', error)),
+    60 * 1000,
+  )
+  dns.unref()
   run()
 }

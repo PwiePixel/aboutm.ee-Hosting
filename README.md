@@ -34,50 +34,66 @@ Das Skript fragt nach der Adresse der Website, deiner E-Mail-Adresse und einem C
 alles selbst:
 
 1. installiert Docker
-2. legt einen **Cloudflare-Tunnel** für die Website an — Port 80/443 müssen dafür nicht offen sein, und die Website
-   verrät die IP des Servers nicht
-3. setzt die DNS-Einträge: die Website über den Tunnel, `*.<Domain>` für die Minecraft-Adressen direkt auf den Server
-4. erzeugt die Turnstile-Schlüssel für die Sicherheitsprüfung
-5. öffnet Port 25565 in der Firewall (falls `ufw` aktiv ist)
-6. baut und startet die Website — zunächst ohne Verbindung nach außen
-7. legt dein Admin-Konto an und zeigt dir einmalig das Passwort
-8. schaltet die Website erst danach öffentlich und lädt die Minecraft-Images vor
+2. legt die DNS-Einträge an: die Website (über Cloudflare, orange Wolke) und die Adresse des Servers für Minecraft
+   (direkt, graue Wolke)
+3. erzeugt die Turnstile-Schlüssel für die Sicherheitsprüfung
+4. öffnet in der Firewall die Ports 80/443 und den Portbereich der Welten (falls `ufw` aktiv ist)
+5. baut und startet die Website — zunächst ohne Verbindung nach außen
+6. legt dein Admin-Konto an und zeigt dir einmalig das Passwort
+7. schaltet die Website öffentlich und lädt die Minecraft-Images vor
 
-Das Skript lässt sich jederzeit erneut starten (auch zum Aktualisieren): Vorhandenes wird wiederverwendet, eigene
-Zeilen in der `.env` bleiben erhalten, und bestehende DNS-Einträge oder Tunnel-Weiterleitungen überschreibt es nie
-ohne Rückfrage.
+Nach der Installation laufen echte Server: Jede Welt ist ein eigener Docker-Container. Das Skript lässt sich jederzeit
+erneut starten (auch zum Aktualisieren): Vorhandenes wird wiederverwendet, eigene Zeilen in der `.env` bleiben
+erhalten, und bestehende DNS-Einträge überschreibt es nie ohne Rückfrage.
 
 **Das API-Token** legst du im Cloudflare-Dashboard an: *Mein Profil → API-Token → Token erstellen →
 Benutzerdefiniertes Token* mit diesen Berechtigungen:
 
 | Bereich | Berechtigung | Stufe |
 | --- | --- | --- |
-| Konto | Cloudflare Tunnel | Bearbeiten |
-| Konto | Turnstile | Bearbeiten |
 | Zone | DNS | Bearbeiten |
 | Zone | Zone | Lesen |
+| Konto | Turnstile | Bearbeiten |
 
-Es muss ein persönliches Token sein (Mein Profil → API-Token) — mit einem Konto-Token lässt Cloudflare kein
-Turnstile-Widget anlegen. Das Token wird nur während der Installation benutzt und nirgends gespeichert. Du kannst
-es danach wieder löschen.
+Es muss ein persönliches Token sein — mit einem Konto-Token lässt Cloudflare kein Turnstile-Widget anlegen. Das Token
+**bleibt auf dem Server gespeichert** (in `.env`, nur für root lesbar), weil die Website damit für jede neue Welt
+einen DNS-Eintrag anlegt. Beschränke es auf diese eine Domain. Wer mag, trägt nach der Installation ein zweites,
+engeres Token ein, das nur *Zone · DNS · Bearbeiten* darf.
 
-Ohne API-Token geht es auch: Dann fragt das Skript nach den Turnstile-Schlüsseln und optional nach einem
-Tunnel-Token, und du trägst die DNS-Einträge selbst ein.
+Ohne API-Token geht es auch: Dann fragt das Skript nach den Turnstile-Schlüsseln, du trägst die DNS-Einträge selbst
+ein, und Spieler verbinden sich über `<Server-Adresse>:<Port>` statt über einen eigenen Namen je Welt.
 
-> Minecraft selbst läuft nicht durch den Tunnel — Cloudflare leitet Minecraft-Verbindungen im kostenlosen Tarif nicht
-> durch. Spieler verbinden sich direkt mit dem Server über Port 25565; die IP des Servers ist über die
-> Minecraft-Adressen also sichtbar.
+### Wie Spieler auf eine Welt kommen
+
+Jede Welt bekommt beim Anlegen einen festen Port auf dem Server (aus `MC_PORT_MIN`–`MC_PORT_MAX`, Standard
+25600–26599) und einen DNS-Eintrag bei Cloudflare:
+
+```
+_minecraft._tcp.mc-abc123.aboutm.ee   SRV   0 5 25612   node.aboutm.ee
+```
+
+Spieler tippen in Minecraft Java nur `mc-abc123.aboutm.ee` ein; das Spiel schlägt den Eintrag nach und verbindet sich
+mit dem richtigen Port. Beim Löschen der Welt verschwindet der Eintrag wieder.
+
+Gut zu wissen:
+
+- **Cloudflare begrenzt die Zahl der DNS-Einträge je Domain**: 200 im kostenlosen Tarif (1.000 bei Domains, die vor
+  September 2024 angelegt wurden), 3.500 im Pro-Tarif. Jede Welt braucht einen. Den Stand zeigt der Admin-Bereich.
+  Ist die Grenze erreicht — oder Cloudflare gerade nicht erreichbar —, bleibt eine neue Welt trotzdem spielbar: Ihre
+  Adresse ist dann `node.aboutm.ee:<Port>`, und der Eintrag wird nachgeholt, sobald es wieder geht.
+- Die IP des Servers ist über die Minecraft-Adresse sichtbar. Cloudflare leitet nur Webseiten durch, kein Minecraft.
+- Der Portbereich muss auch in einer etwaigen Firewall deines Anbieters offen sein.
+- Minecraft Bedrock nutzt solche Einträge nicht — das Angebot ist für Java.
 
 ### Von Hand
 
-1. **DNS bei Cloudflare:** `*.aboutm.ee` als A-Eintrag auf die IP des Servers, Proxy **aus** (graue Wolke). Für die
-   Website entweder einen Tunnel einrichten (öffentlicher Hostname → `http://web:3000`) oder einen A-Eintrag mit
-   Proxy an und SSL/TLS-Modus **Full**.
+1. **DNS bei Cloudflare:** die Website als A-Eintrag auf die IP des Servers, Proxy **an**; `node.aboutm.ee` als
+   A-Eintrag auf dieselbe IP, Proxy **aus** (graue Wolke).
 2. **Turnstile:** Cloudflare-Dashboard → Turnstile → Widget hinzufügen → Site Key und Secret Key notieren.
-3. `cp .env.example .env` und ausfüllen. `COMPOSE_PROFILES=tunnel` (mit `TUNNEL_TOKEN`) oder
-   `COMPOSE_PROFILES=caddy` — bei Caddy zusätzlich `CLIENT_IP_HEADER=x-real-ip`.
-4. `docker compose up -d --build`
-5. Admin-Konto anlegen:
+3. `cp .env.example .env` und ausfüllen.
+4. Ports 80, 443 und den Portbereich der Welten in der Firewall freigeben.
+5. `docker compose up -d --build`
+6. Admin-Konto anlegen:
 
 ```bash
 ADMIN_PASSWORD='dein-passwort' docker compose exec -e ADMIN_PASSWORD web node scripts/make-admin.mjs deine@mail.de
@@ -85,23 +101,31 @@ ADMIN_PASSWORD='dein-passwort' docker compose exec -e ADMIN_PASSWORD web node sc
 
 Gibt es das Konto schon, bekommt es nur die Admin-Rechte dazu; mit `--entfernen` am Ende nimmst du sie wieder weg.
 
+### HTTPS
+
+Die Website liegt hinter Cloudflare; das öffentliche Zertifikat stellt Cloudflare. Für die Strecke von Cloudflare zu
+deinem Server erzeugt Caddy selbst ein Zertifikat (`CADDY_TLS=internal`). Das passt zu den Cloudflare-Modi
+*Flexible* und *Full*. Steht deine Domain auf *Full (strict)* oder willst du die Website ohne Cloudflare-Proxy
+betreiben, setze in der `.env` `CADDY_TLS=<deine E-Mail>` — dann holt Caddy ein Zertifikat von Let's Encrypt.
+
 ### Vor dem Start erledigen
 
 - **Impressum** und **Datenschutz** ausfüllen: `app/(site)/impressum/page.tsx` und `app/(site)/datenschutz/page.tsx`.
   Die gelb markierten Stellen sind Platzhalter. Mojang verlangt außerdem, dass klar ist, wer die Seite betreibt und
   wie man ihn erreicht — eine echte Kontaktadresse (`SUPPORT_EMAIL` in `.env`) gehört also dazu.
+- **Bilder** hochladen: Admin → Bilder.
 
 ## Bilder
 
-Die mitgelieferten Bilder in `public/art/` sind echte Minecraft-Screenshots, die ihr Urheber auf Flickr unter
-[CC BY 2.0](https://creativecommons.org/licenses/by/2.0/deed.de) veröffentlicht hat. Die Lizenz verlangt, Urheber,
-Quelle und Lizenz zu nennen — das macht die Seite `/bildnachweise` (Daten in `lib/credits.ts`).
+Die Seite bringt keine Bilder mit. Unter **Admin → Bilder** lädst du deine eigenen hoch — ein großes Bild für die
+Startseite und bis zu sechs Welt-Bilder, die als Titelbild der Welten dienen. Solange ein Platz leer ist, zeigt die
+Seite dort eine neutrale Fläche.
 
-Wichtig zu wissen: Minecraft-Bilder sind **nicht** lizenzfrei. Die Rechte am Spiel liegen bei Mojang und Microsoft;
-deren [Usage Guidelines](https://www.minecraft.net/de-de/usage-guidelines) erlauben Screenshots unter Bedingungen,
-unter anderem dem Hinweis „Not an official Minecraft service …“, der hier auf jeder Seite steht. Am saubersten sind
-Screenshots, die du selbst aufgenommen hast: Unter **Admin → Bilder** lädst du sie hoch, sie ersetzen die
-mitgelieferten sofort, und deren Eintrag verschwindet aus den Bildnachweisen.
+Nimm Screenshots, die du selbst aufgenommen hast (in Minecraft mit F2). Minecraft-Bilder sind nicht lizenzfrei: Die
+Rechte am Spiel liegen bei Mojang und Microsoft, deren
+[Usage Guidelines](https://www.minecraft.net/de-de/usage-guidelines) eigene Screenshots unter Bedingungen erlauben —
+unter anderem mit dem Hinweis „Not an official Minecraft service …“, der hier auf jeder Seite steht. Fremde Bilder
+aus dem Netz brauchen zusätzlich die Erlaubnis dessen, der sie gemacht hat.
 
 ## Statistik
 
@@ -160,16 +184,16 @@ Die Liste steht in `lib/versions.ts`. Den aktuellen Paper-Build einer Version ze
   weder im Dateimanager noch beim Starten, Sichern, Wiederherstellen oder Löschen (`lib/safe-fs.ts`). Die Tests in
   `tests/symlink-safety.test.ts` spielen genau diese Angriffe durch.
 - **Minecraft-Container** laufen ohne Root-Rechte, ohne Zusatzrechte (`cap-drop ALL`) und mit festen Grenzen für
-  RAM, CPU und Prozesse. Sie teilen sich aber ein Docker-Netz und haben Internetzugang.
+  RAM, CPU und Prozesse. Untereinander können sie sich nicht erreichen; Internetzugang haben sie.
 - **Die Website hat Zugriff auf den Docker-Socket** und damit volle Kontrolle über den Server. Betreibe auf diesem
   Server nichts anderes Schützenswertes und halte ihn aktuell.
 - **Ohne Turnstile-Schlüssel bleiben Formulare im Live-Betrieb gesperrt** — ein vergessener Schlüssel öffnet die
   Seite nicht für Bots. (`ALLOW_NO_TURNSTILE=1` hebt das zum Ausprobieren auf.)
-- **Die Adresse des Besuchers** (für Anmelde-Limits) wird nur aus der Kopfzeile gelesen, die Tunnel bzw. Caddy
-  selbst setzen (`CLIENT_IP_HEADER`). Caddy glaubt dabei nur Cloudflares Servern.
+- **Die Adresse des Besuchers** (für Anmelde-Limits) wird nur aus der Kopfzeile gelesen, die Caddy selbst setzt.
+  Caddy glaubt dabei nur Cloudflares Servern.
 - Passwörter werden mit scrypt gehasht. Sitzungen liegen als Hash in der Datenbank; das Cookie ist `HttpOnly`.
-- Spieler erreichen ihre Welt über den Router, der ihre echte Adresse per PROXY-Protokoll weiterreicht. Die
-  Website stellt das bei jedem Start in `config/paper-global.yml` der Welt sicher.
+- **Das Cloudflare-Token liegt auf dem Server** (`.env`). Wer den Server übernimmt, kann damit die DNS-Einträge
+  der Domain ändern — deshalb das Token auf diese eine Domain und auf DNS beschränken.
 
 ## Lokal entwickeln
 

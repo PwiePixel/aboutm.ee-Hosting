@@ -1,6 +1,9 @@
 import { LimitsForm, LiveBoard } from '@/components/admin'
 import { adminCounts, adminLive } from '@/lib/admin'
 import { requireAdmin } from '@/lib/auth'
+import { config } from '@/lib/config'
+import { db } from '@/lib/db'
+import { dnsEnabled, dnsUsage } from '@/lib/dns'
 import { formatDateTime, formatNumber } from '@/lib/format'
 import { limits } from '@/lib/settings'
 import { dailyStats, formatPlayTime, totals } from '@/lib/stats'
@@ -14,6 +17,11 @@ export default async function AdminLivePage() {
   const counts = adminCounts()
   const stats = totals()
   const days = dailyStats(14)
+  const usage = await dnsUsage()
+  const withoutRecord = (
+    db().prepare('SELECT COUNT(*) AS n FROM worlds WHERE port IS NOT NULL AND dns_record_id IS NULL').get() as { n: number }
+  ).n
+  const nearLimit = usage?.quota ? usage.used >= usage.quota * 0.9 : false
   const busiest = Math.max(1, ...days.map((day) => day.playMs))
 
   const numbers: Array<[string, string]> = [
@@ -45,6 +53,46 @@ export default async function AdminLivePage() {
           Starts warten, bis wieder Platz ist.
         </p>
         <LimitsForm limits={limits()} />
+      </section>
+
+      <section className="mt-12">
+        <h2 className="eyebrow">Adressen der Welten</h2>
+        <dl className="panel mt-3 divide-y divide-line">
+          <div className="flex justify-between gap-6 px-4 py-3 text-[14px]">
+            <dt className="text-ink-dim">Eigene Adresse je Welt (SRV-Eintrag)</dt>
+            <dd className="text-right font-semibold">
+              {dnsEnabled() ? `an — mc-….${config.serverDomain}` : 'aus — kein Cloudflare-Zugang hinterlegt'}
+            </dd>
+          </div>
+          <div className="flex justify-between gap-6 px-4 py-3 text-[14px]">
+            <dt className="text-ink-dim">Adresse dieses Servers</dt>
+            <dd className="text-right font-semibold">
+              {config.nodeHost} · Ports {config.portMin}–{config.portMax}
+            </dd>
+          </div>
+          {usage && (
+            <div className="flex justify-between gap-6 px-4 py-3 text-[14px]">
+              <dt className="text-ink-dim">DNS-Einträge der Domain bei Cloudflare</dt>
+              <dd className={`text-right font-semibold ${nearLimit ? 'text-st-starting' : ''}`}>
+                {formatNumber(usage.used)}
+                {usage.quota ? ` von ${formatNumber(usage.quota)}` : ''} belegt
+              </dd>
+            </div>
+          )}
+          {dnsEnabled() && withoutRecord > 0 && (
+            <div className="flex justify-between gap-6 px-4 py-3 text-[14px]">
+              <dt className="text-ink-dim">Welten ohne eigenen Eintrag</dt>
+              <dd className="text-right font-semibold text-st-starting">
+                {formatNumber(withoutRecord)} — erreichbar über {config.nodeHost}:&lt;Port&gt;
+              </dd>
+            </div>
+          )}
+        </dl>
+        <p className="mt-3 max-w-[680px] text-[13px] text-ink-faint">
+          Jede Welt braucht einen DNS-Eintrag. Cloudflare begrenzt deren Zahl je Domain (kostenlos 200, bei vor
+          September 2024 angelegten Domains 1.000, im Pro-Tarif 3.500). Ist die Grenze erreicht, bleiben neue Welten
+          trotzdem erreichbar — über die Adresse des Servers mit ihrem Port statt über einen eigenen Namen.
+        </p>
       </section>
 
       <section className="mt-12">

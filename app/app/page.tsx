@@ -1,7 +1,7 @@
 import { Check, Plus } from 'lucide-react'
 import type { Metadata } from 'next'
-import Image from 'next/image'
 import Link from 'next/link'
+import { Cover } from '@/components/cover'
 import { StatusBadge } from '@/components/world-header'
 import { imageUrl, worldArt } from '@/lib/art'
 import { requireUser } from '@/lib/auth'
@@ -33,18 +33,12 @@ export default async function WorldsPage({ searchParams }: { searchParams: Promi
     return (
       <div className="mx-auto max-w-[560px] text-center">
         {deleted}
-        <div className="border border-line">
-          <Image
-            src={hero}
-            alt=""
-            width={960}
-            height={420}
-            unoptimized
-            priority
-            className="block aspect-[16/9] w-full object-cover"
-          />
-        </div>
-        <p className="mt-8 text-[14px] text-ink-dim">{slotsLine}</p>
+        {hero && (
+          <div className="mb-8 border border-line">
+            <Cover src={hero} priority className="aspect-[16/9] w-full" />
+          </div>
+        )}
+        <p className="text-[14px] text-ink-dim">{slotsLine}</p>
         <div className="mx-auto mt-6 grid size-11 place-items-center bg-panel-2 text-accent">
           <Plus className="size-5" aria-hidden />
         </div>
@@ -93,14 +87,7 @@ export default async function WorldsPage({ searchParams }: { searchParams: Promi
                 className="group block border border-line bg-base-soft hover:border-line-strong"
               >
                 <div className="relative">
-                  <Image
-                    src={art}
-                    alt=""
-                    width={960}
-                    height={320}
-                    unoptimized
-                    className="block aspect-[16/7] w-full object-cover"
-                  />
+                  <Cover src={art} className="aspect-[16/7] w-full" />
                   <span className="absolute right-3 top-3">
                     <StatusBadge status={world.status} />
                   </span>

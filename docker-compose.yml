@@ -1,10 +1,8 @@
-# Alles, was auf dem Server läuft:
-#   web    – die Website mit Verwaltung; startet die Minecraft-Container
-#   router – nimmt Minecraft-Verbindungen auf Port 25565 an und leitet sie
-#            anhand der Adresse (mc-xxxx.<SERVER_DOMAIN>) an die richtige Welt
-#   tunnel – Cloudflare-Tunnel: bringt die Website ins Netz, ohne dass Port 80/443 offen sein muss
-#   caddy  – Alternative zum Tunnel: HTTPS direkt über diesen Server
-# Welcher der beiden läuft, bestimmt COMPOSE_PROFILES in .env (tunnel oder caddy).
+# Was auf dem Server läuft:
+#   web    – die Website mit Verwaltung; startet für jede Welt einen eigenen Minecraft-Container
+#   caddy  – HTTPS für die Website
+# Die Minecraft-Container tauchen hier nicht auf: Die Website legt sie über den Docker-Socket an,
+# jede Welt auf ihrem eigenen Port (MC_PORT_MIN–MC_PORT_MAX).
 services:
   web:
     build: .
@@ -16,8 +14,8 @@ services:
       DATA_DIR: ${DATA_PATH:-/srv/aboutmee/data}
       HOST_DATA_DIR: ${DATA_PATH:-/srv/aboutmee/data}
       MC_NETWORK: aboutmee-mc
-      # Woher die Adresse des Besuchers kommt: der Tunnel setzt cf-connecting-ip, Caddy setzt x-real-ip.
-      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-cf-connecting-ip}
+      # Die Adresse des Besuchers setzt Caddy (siehe Caddyfile) — nur dieser Kopfzeile wird geglaubt.
+      CLIENT_IP_HEADER: x-real-ip
     volumes:
       - ${DATA_PATH:-/srv/aboutmee/data}:${DATA_PATH:-/srv/aboutmee/data}
       - /var/run/docker.sock:/var/run/docker.sock
@@ -29,40 +27,13 @@ services:
       start_period: 20s
     networks: [web]
 
-  router:
-    image: itzg/mc-router:latest
-    restart: unless-stopped
-    # Braucht Lesezugriff auf den Docker-Socket, um laufende Welten zu finden.
-    user: "0:0"
-    environment:
-      IN_DOCKER: "true"
-      DOCKER_NETWORK: aboutmee-mc
-      CONNECTION_RATE_LIMIT: "20"
-      # Reicht die echte Adresse jedes Spielers an den Server weiter. Ohne das kämen alle von der Adresse
-      # des Routers: gleichzeitig beitretende Freunde würden gedrosselt, und eine IP-Sperre träfe alle.
-      # Die Website stellt dazu bei jeder Welt proxy-protocol in der Paper-Konfiguration ein.
-      USE_PROXY_PROTOCOL: "true"
-    ports:
-      - "25565:25565"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks: [mc]
-
-  tunnel:
-    profiles: [tunnel]
-    image: cloudflare/cloudflared:latest
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run
-    environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
-    networks: [web]
-
   caddy:
-    profiles: [caddy]
     image: caddy:2
     restart: unless-stopped
     environment:
-      SITE_DOMAIN: ${SITE_DOMAIN:-localhost}
+      SITE_DOMAIN: ${SITE_DOMAIN:?SITE_DOMAIN in .env eintragen, z. B. aboutm.ee}
+      # internal = eigenes Zertifikat (hinter Cloudflare), E-Mail-Adresse = Let's Encrypt — siehe Caddyfile
+      CADDY_TLS: ${CADDY_TLS:-internal}
     ports:
       - "80:80"
       - "443:443"
@@ -74,8 +45,6 @@ services:
 
 networks:
   web:
-  mc:
-    name: aboutmee-mc
 
 volumes:
   caddy_data:

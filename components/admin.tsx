@@ -325,23 +325,25 @@ export function ImageSlotCard({
   slot: string
   title: string
   hint: string
-  url: string
+  url: string | null
   custom: boolean
 }) {
   const [state, action] = useActionState(uploadImageAction, EMPTY)
   return (
     <li className="panel">
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={url}
-        alt={`Aktuelles Bild für ${title}`}
-        className="block aspect-[16/7] w-full object-cover"
-      />
+      {url ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={url} alt={`Aktuelles Bild für ${title}`} className="block aspect-[16/7] w-full object-cover" />
+      ) : (
+        <div className="cover-empty grid aspect-[16/7] w-full place-items-center text-[13px] text-ink-faint">
+          Noch kein Bild
+        </div>
+      )}
       <div className="space-y-3 p-4">
         <div>
           <h3 className="font-semibold">{title}</h3>
           <p className="text-[13px] text-ink-dim">
-            {hint} {custom ? 'Eigenes Bild aktiv.' : 'Zeigt das mitgelieferte Bild.'}
+            {hint} {custom ? 'Bild ist aktiv.' : 'Noch leer — die Seite zeigt hier eine neutrale Fläche.'}
           </p>
         </div>
         <form action={action} className="space-y-3">
@@ -364,8 +366,8 @@ export function ImageSlotCard({
             {custom && (
               <ConfirmButton
                 className="btn min-h-[38px] px-3 text-[13px]"
-                title="Eigenes Bild entfernen?"
-                text="Danach erscheint wieder das mitgelieferte Bild."
+                title="Bild entfernen?"
+                text="Danach zeigt die Seite an dieser Stelle wieder eine neutrale Fläche."
                 confirmLabel="Entfernen"
                 danger
                 action={() => removeImageAction(slot)}

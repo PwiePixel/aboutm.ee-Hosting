@@ -3,7 +3,7 @@
 // Aufruf mit, damit ein Test prüfen kann, was das Skript wirklich getan hat.
 import http from 'node:http'
 
-export function startCloudflareMock({ token = 'test-token', zones = ['example.com'], accountToken = false } = {}) {
+export function startCloudflareMock({ token = 'test-token', zones = ['example.com'], accountToken = false, ssl = 'full' } = {}) {
   const state = {
     calls: [],
     zones: zones.map((name, index) => ({ id: `zone${index + 1}`, name, account: { id: 'acc1', name: 'Test' } })),
@@ -11,6 +11,10 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
     tunnels: [],
     tunnelConfigs: {},
     widgets: [],
+    /** SSL/TLS-Modus der Zone */
+    ssl,
+    /** Auf true setzen, damit DNS-Aufrufe mit einem Fehler beantwortet werden. */
+    failDns: false,
     nextId: 1,
   }
   const id = (prefix) => `${prefix}${state.nextId++}`
@@ -31,6 +35,21 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
       return ok(state.zones.filter((zone) => !name || zone.name === name))
     }
 
+    if ((match = path.match(/^\/zones\/([^/]+)\/settings\/ssl$/))) {
+      if (method === 'GET') return ok({ id: 'ssl', value: state.ssl })
+      if (method === 'PATCH') {
+        if (!['off', 'flexible', 'full', 'strict'].includes(body?.value)) return fail(400, 'Invalid value')
+        state.ssl = body.value
+        return ok({ id: 'ssl', value: state.ssl })
+      }
+    }
+
+    if (path.includes('/dns_records') && state.failDns) return fail(500, 'DNS API unavailable')
+
+    if ((match = path.match(/^\/zones\/([^/]+)\/dns_records\/usage$/)) && method === 'GET') {
+      return ok({ record_quota: 200, record_usage: state.dns.filter((r) => r.zone === match[1]).length })
+    }
+
     if ((match = path.match(/^\/zones\/([^/]+)\/dns_records$/))) {
       const zone = state.zones.find((entry) => entry.id === match[1])
       if (!zone) return fail(404, 'Zone not found')
@@ -41,6 +60,18 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
       }
       if (method === 'POST') {
         const sameName = state.dns.filter((r) => r.zone === zone.id && r.name === body.name)
+        if (body.type === 'SRV') {
+          // SRV-Einträge tragen Port und Ziel im Feld "data".
+          const data = body.data ?? {}
+          if (!Number.isInteger(data.port) || typeof data.target !== 'string' || !data.target) {
+            return fail(400, 'SRV record requires data.port and data.target')
+          }
+          if (body.proxied) return fail(400, 'SRV records cannot be proxied')
+          if (!body.name.startsWith('_minecraft._tcp.')) return fail(400, 'unexpected SRV name in test')
+          const record = { id: id('rec'), zone: zone.id, proxied: false, ...body, content: `${data.priority ?? 0} ${data.weight ?? 0} ${data.port} ${data.target}` }
+          state.dns.push(record)
+          return ok(record)
+        }
         // Wie bei Cloudflare: ein CNAME verträgt sich mit keinem anderen Eintrag desselben Namens.
         if (sameName.some((r) => r.type === 'CNAME' || body.type === 'CNAME')) {
           return fail(400, 'A record with the same name already exists (CNAME conflict).')
@@ -52,6 +83,13 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
         state.dns.push(record)
         return ok(record)
       }
+    }
+
+    if ((match = path.match(/^\/zones\/([^/]+)\/dns_records\/([^/]+)$/)) && method === 'PATCH') {
+      const record = state.dns.find((r) => r.zone === match[1] && r.id === match[2])
+      if (!record) return fail(404, 'Record not found')
+      Object.assign(record, body)
+      return ok(record)
     }
 
     if ((match = path.match(/^\/zones\/([^/]+)\/dns_records\/([^/]+)$/)) && method === 'DELETE') {

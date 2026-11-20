@@ -3,9 +3,9 @@ import path from 'node:path'
 import { config } from './config'
 
 /**
- * Bilder der Website. Im Admin-Bereich lassen sich eigene Minecraft-Screenshots hochladen;
- * sie liegen unter <DATA_DIR>/bilder. Fehlt ein eigenes Bild, erscheint das mitgelieferte aus public/art/
- * (echte Minecraft-Screenshots unter freier Lizenz — Urheber und Lizenz stehen in lib/credits.ts).
+ * Bilder der Website. Die Seite bringt keine eigenen mit: Der Betreiber lädt sie im Admin-Bereich
+ * hoch (z. B. eigene Minecraft-Screenshots); sie liegen unter <DATA_DIR>/bilder. Solange ein Platz
+ * leer ist, zeigt die Seite dort eine neutrale Fläche.
  */
 export const WORLD_IMAGE_COUNT = 6
 export const IMAGE_SLOTS = ['hero', ...Array.from({ length: WORLD_IMAGE_COUNT }, (_, i) => `welt-${i + 1}`)] as const
@@ -33,17 +33,17 @@ export function customImage(slot: ImageSlot): CustomImage | null {
   return null
 }
 
-export function imageUrl(slot: ImageSlot): string {
+/** Adresse des hochgeladenen Bildes — oder `null`, wenn der Platz noch leer ist. */
+export function imageUrl(slot: ImageSlot): string | null {
   const custom = customImage(slot)
-  return custom ? `/bilder/${slot}?v=${custom.version}` : `/art/${slot}.webp`
+  return custom ? `/bilder/${slot}?v=${custom.version}` : null
 }
 
-/** Jede Welt bekommt dauerhaft dasselbe Bild — abgeleitet aus ihrer Kennung. */
-export function worldArt(worldId: string): string {
+/** Jede Welt bekommt dauerhaft dasselbe der hochgeladenen Welt-Bilder — abgeleitet aus ihrer Kennung. */
+export function worldArt(worldId: string): string | null {
+  const uploaded = IMAGE_SLOTS.filter((slot) => slot !== 'hero' && customImage(slot) !== null)
+  if (uploaded.length === 0) return null
   let hash = 0
   for (let i = 0; i < worldId.length; i++) hash = (hash * 31 + worldId.charCodeAt(i)) >>> 0
-  const slots = IMAGE_SLOTS.filter((slot) => slot !== 'hero')
-  const uploaded = slots.filter((slot) => customImage(slot) !== null)
-  const pool = uploaded.length > 0 ? uploaded : slots
-  return imageUrl(pool[hash % pool.length]!)
+  return imageUrl(uploaded[hash % uploaded.length]!)
 }

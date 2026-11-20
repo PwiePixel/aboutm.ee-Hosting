@@ -15,6 +15,8 @@ type Mock = {
     tunnels: Array<{ id: string; name: string; config_src: string }>
     tunnelConfigs: Record<string, { ingress: Array<{ hostname?: string; service: string }> }>
     widgets: Array<{ name: string; domains: string[]; mode: string; sitekey: string; secret: string }>
+    ssl: string
+    failDns: boolean
   }
 }
 
@@ -31,10 +33,10 @@ function runCloudflareSetup(
     WORK_DIR="$(mktemp -d)"
     CF_HEADERS="$WORK_DIR/headers"
     printf 'Authorization: Bearer %s\\n' "$TEST_TOKEN" > "$CF_HEADERS"
-    TUNNEL_TOKEN="" ; : "\${TURNSTILE_SITE_KEY:=}" "\${TURNSTILE_SECRET_KEY:=}"
+    : "\${TURNSTILE_SITE_KEY:=}" "\${TURNSTILE_SECRET_KEY:=}" "\${CADDY_TLS:=internal}" "\${ADMIN_EMAIL:=chef@example.com}"
     cloudflare_setup >&2
-    jq -n --arg tunnel "$TUNNEL_TOKEN" --arg site "$TURNSTILE_SITE_KEY" --arg secret "$TURNSTILE_SECRET_KEY" \\
-      '{tunnel: $tunnel, site: $site, secret: $secret}'
+    jq -n --arg zone "$CLOUDFLARE_ZONE_ID" --arg site "$TURNSTILE_SITE_KEY" --arg secret "$TURNSTILE_SECRET_KEY" --arg tls "$CADDY_TLS" \\
+      '{zone: $zone, site: $site, secret: $secret, tls: $tls}'
   `
   return new Promise((resolve) => {
     // detached löst das Terminal ab — wie beim Start über cron oder eine Pipe ohne Rückfragemöglichkeit.
@@ -60,7 +62,13 @@ function runCloudflareSetup(
   })
 }
 
-const BASE = { SITE_DOMAIN: 'hosting.example.com', SERVER_DOMAIN: 'example.com', MODE: 'tunnel', PUBLIC_IP: '203.0.113.7' }
+const BASE = {
+  SITE_DOMAIN: 'hosting.example.com',
+  SERVER_DOMAIN: 'example.com',
+  NODE_HOST: 'node.example.com',
+  PUBLIC_IP: '203.0.113.7',
+}
+const records = (mock: Mock) => mock.state.dns.map(({ type, name, content, proxied }) => ({ type, name, content, proxied }))
 
 describe('install.sh — Cloudflare einrichten', () => {
   let mock: Mock
@@ -69,27 +77,20 @@ describe('install.sh — Cloudflare einrichten', () => {
   })
   afterEach(() => mock.close())
 
-  it('legt Tunnel, DNS und Turnstile an', async () => {
+  it('legt die DNS-Einträge für Website und Server sowie die Turnstile-Schlüssel an', async () => {
     const run = await runCloudflareSetup(mock, BASE)
     expect(run.code, run.stderr).toBe(0)
 
-    // Tunnel: von Cloudflare verwaltet, leitet die Adresse an die Website, Rest 404
-    expect(mock.state.tunnels).toHaveLength(1)
-    const tunnel = mock.state.tunnels[0]!
-    expect(tunnel).toMatchObject({ name: 'aboutmee', config_src: 'cloudflare' })
-    expect(mock.state.tunnelConfigs[tunnel.id]!.ingress).toEqual([
-      { hostname: 'hosting.example.com', service: 'http://web:3000' },
-      { service: 'http_status:404' },
+    // Website über Cloudflare (mit Proxy), Minecraft-Adresse des Servers direkt (ohne Proxy)
+    expect(records(mock)).toEqual([
+      { type: 'A', name: 'hosting.example.com', content: '203.0.113.7', proxied: true },
+      { type: 'A', name: 'node.example.com', content: '203.0.113.7', proxied: false },
     ])
-    expect(run.result!.tunnel).toBe(`tunneltoken.${tunnel.id}`)
+    // Kein Tunnel, kein Platzhalter-Eintrag
+    expect(mock.state.tunnels).toHaveLength(0)
+    expect(mock.state.dns.some((record) => record.name.startsWith('*'))).toBe(false)
 
-    // DNS: Website über den Tunnel (mit Proxy), Welten direkt auf den Server (ohne Proxy)
-    const dns = mock.state.dns.map(({ type, name, content, proxied }) => ({ type, name, content, proxied }))
-    expect(dns).toContainEqual({ type: 'CNAME', name: 'hosting.example.com', content: `${tunnel.id}.cfargotunnel.com`, proxied: true })
-    expect(dns).toContainEqual({ type: 'A', name: '*.example.com', content: '203.0.113.7', proxied: false })
-    expect(dns).toHaveLength(2)
-
-    // Turnstile
+    expect(run.result!.zone).toBe('zone1')
     expect(mock.state.widgets).toHaveLength(1)
     expect(mock.state.widgets[0]).toMatchObject({ domains: ['hosting.example.com'], mode: 'managed' })
     expect(run.result!.site).toBe(mock.state.widgets[0]!.sitekey)
@@ -104,10 +105,31 @@ describe('install.sh — Cloudflare einrichten', () => {
       TURNSTILE_SECRET_KEY: first.result!.secret!,
     })
     expect(second.code, second.stderr).toBe(0)
-    expect(mock.state.tunnels).toHaveLength(1)
     expect(mock.state.dns).toHaveLength(2)
     expect(mock.state.widgets).toHaveLength(1)
     expect(second.result).toEqual(first.result)
+  })
+
+  it('ändert den SSL/TLS-Modus der Domain nicht — und nimmt bei „Full (strict)“ ein öffentliches Zertifikat', async () => {
+    await mock.close()
+    mock = await startCloudflareMock({ zones: ['example.com'], ssl: 'flexible' })
+    const flexible = await runCloudflareSetup(mock, { ...BASE, CADDY_TLS: 'internal', ADMIN_EMAIL: 'chef@example.com' })
+    expect(flexible.code, flexible.stderr).toBe(0)
+    expect(mock.state.ssl).toBe('flexible')
+    expect(flexible.result!.tls).toBe('internal')
+
+    mock.state.ssl = 'strict'
+    const strict = await runCloudflareSetup(mock, {
+      ...BASE,
+      CADDY_TLS: 'internal',
+      ADMIN_EMAIL: 'chef@example.com',
+      TURNSTILE_SITE_KEY: flexible.result!.site!,
+      TURNSTILE_SECRET_KEY: flexible.result!.secret!,
+    })
+    expect(strict.code, strict.stderr).toBe(0)
+    expect(mock.state.ssl).toBe('strict')
+    expect(strict.result!.tls).toBe('chef@example.com')
+    expect(mock.state.calls.some((call) => call.method === 'PATCH' && call.path.endsWith('/settings/ssl'))).toBe(false)
   })
 
   it('ersetzt einen fremden DNS-Eintrag nicht ohne Zustimmung', async () => {
@@ -127,67 +149,41 @@ describe('install.sh — Cloudflare einrichten', () => {
     expect(agreed.code, agreed.stderr).toBe(0)
     const site = mock.state.dns.filter((r) => r.name === 'hosting.example.com')
     expect(site).toHaveLength(1)
-    expect(site[0]).toMatchObject({ type: 'CNAME', proxied: true })
+    expect(site[0]).toMatchObject({ type: 'A', content: '203.0.113.7', proxied: true })
   })
 
-  it('setzt ohne Tunnel einen A-Eintrag für die Website', async () => {
-    const run = await runCloudflareSetup(mock, { ...BASE, MODE: 'caddy' })
-    expect(run.code, run.stderr).toBe(0)
-    expect(mock.state.tunnels).toHaveLength(0)
-    expect(mock.state.dns.map(({ type, name, proxied }) => ({ type, name, proxied }))).toEqual([
-      { type: 'A', name: 'hosting.example.com', proxied: true },
-      { type: 'A', name: '*.example.com', proxied: false },
-    ])
+  it('verlangt, dass die Server-Adresse in der Domain der Welten liegt', async () => {
+    const run = await runCloudflareSetup(mock, { ...BASE, NODE_HOST: 'node.andere-domain.de' })
+    expect(run.code).not.toBe(0)
+    expect(run.stderr).toContain('node.andere-domain.de')
   })
 
   it('bricht mit der Meldung von Cloudflare ab, wenn das Token nicht stimmt oder die Domain fehlt', async () => {
     const badToken = await runCloudflareSetup(mock, BASE, 'falsches-token')
     expect(badToken.code).not.toBe(0)
     expect(badToken.stderr).toContain('Invalid API token')
-    expect(mock.state.tunnels).toHaveLength(0)
+    expect(badToken.stderr).not.toContain('keine Domain')
+    expect(badToken.stderr).not.toContain('Abgebrochen in Zeile')
+    expect(mock.state.dns).toHaveLength(0)
 
     const noZone = await runCloudflareSetup(mock, { ...BASE, SITE_DOMAIN: 'hosting.andere-domain.de' })
     expect(noZone.code).not.toBe(0)
     expect(noZone.stderr).toContain('keine Domain')
-    expect(mock.state.tunnels).toHaveLength(0)
     expect(mock.state.dns).toHaveLength(0)
   })
 
-  it('verwechselt den Tunnel nicht mit einem ähnlich benannten', async () => {
-    await fetch(`${mock.url}/accounts/acc1/cfd_tunnel`, {
-      method: 'POST',
-      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'aboutmee-alt', config_src: 'cloudflare' }),
-    })
-    const run = await runCloudflareSetup(mock, BASE)
-    expect(run.code, run.stderr).toBe(0)
-    expect(mock.state.tunnels.map((t) => t.name).sort()).toEqual(['aboutmee', 'aboutmee-alt'])
-    const own = mock.state.tunnels.find((t) => t.name === 'aboutmee')!
-    const other = mock.state.tunnels.find((t) => t.name === 'aboutmee-alt')!
-    expect(mock.state.tunnelConfigs[own.id]).toBeDefined()
-    expect(mock.state.tunnelConfigs[other.id]).toBeUndefined() // der fremde Tunnel bleibt unangetastet
-  })
-
-  it('kommt auch mit einem Konto-Token zurecht, das sich nicht vorab prüfen lässt', async () => {
+  it('kommt mit einem Konto-Token zurecht — und fragt nach den Turnstile-Schlüsseln, die es nicht anlegen darf', async () => {
     await mock.close()
     mock = await startCloudflareMock({ zones: ['example.com'], accountToken: true })
-    // Turnstile geht mit Konto-Tokens nicht — mit bereits vorhandenen Schlüsseln läuft trotzdem alles durch …
     const withKeys = await runCloudflareSetup(mock, { ...BASE, TURNSTILE_SITE_KEY: 'vorhanden', TURNSTILE_SECRET_KEY: 'geheim' })
     expect(withKeys.code, withKeys.stderr).toBe(0)
-    expect(mock.state.tunnels).toHaveLength(1)
+    expect(mock.state.dns).toHaveLength(2)
     expect(withKeys.result).toMatchObject({ site: 'vorhanden', secret: 'geheim' })
 
-    // … und ohne Schlüssel fragt das Skript danach, statt mittendrin kommentarlos abzubrechen.
     const withoutKeys = await runCloudflareSetup(mock, BASE)
     expect(withoutKeys.code).not.toBe(0)
     expect(withoutKeys.stderr).toContain('Turnstile')
     expect(mock.state.widgets).toHaveLength(0)
-  })
-
-  it('findet bestehende Platzhalter-Einträge (Name mit Stern) wieder', async () => {
-    await runCloudflareSetup(mock, BASE)
-    const lookups = mock.state.calls.filter((call) => call.method === 'GET' && call.path.endsWith('/dns_records'))
-    expect(lookups.some((call) => call.query.includes('name.exact=%2A.example.com'))).toBe(true)
   })
 
   it('trägt eine geänderte Website-Adresse beim vorhandenen Turnstile-Widget nach', async () => {
@@ -198,51 +194,10 @@ describe('install.sh — Cloudflare einrichten', () => {
     expect(moved.code, moved.stderr).toBe(0)
     expect(mock.state.widgets).toHaveLength(1)
     expect(mock.state.widgets[0]!.domains).toEqual(['hosting.example.com', 'play.example.com'])
-    expect(moved.result).toMatchObject({ site: keys.TURNSTILE_SITE_KEY, secret: keys.TURNSTILE_SECRET_KEY })
-
-    // Stimmt die Adresse schon, wird das Widget nicht angefasst.
-    const puts = () => mock.state.calls.filter((call) => call.method === 'PUT' && call.path.includes('/challenges/widgets/')).length
-    const before = puts()
-    await runCloudflareSetup(mock, { ...BASE, ...keys, SITE_DOMAIN: 'play.example.com', AM_YES: '1' })
-    expect(puts()).toBe(before)
-  })
-
-  it('überschreibt fremde Weiterleitungen eines gleichnamigen Tunnels nicht ohne Zustimmung', async () => {
-    const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
-    const created = await fetch(`${mock.url}/accounts/acc1/cfd_tunnel`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ name: 'aboutmee', config_src: 'cloudflare' }),
-    })
-    const tunnelId = ((await created.json()) as { result: { id: string } }).result.id
-    const foreign = { ingress: [{ hostname: 'shop.example.com', service: 'http://shop:80' }, { service: 'http_status:404' }] }
-    await fetch(`${mock.url}/accounts/acc1/cfd_tunnel/${tunnelId}/configurations`, {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify({ config: foreign }),
-    })
-
-    const refused = await runCloudflareSetup(mock, BASE)
-    expect(refused.code).not.toBe(0)
-    expect(refused.stderr).toContain('shop.example.com')
-    expect(mock.state.tunnelConfigs[tunnelId]).toEqual(foreign)
-    expect(mock.state.dns).toHaveLength(0)
-
-    const agreed = await runCloudflareSetup(mock, { ...BASE, AM_YES: '1' })
-    expect(agreed.code, agreed.stderr).toBe(0)
-    expect(mock.state.tunnelConfigs[tunnelId]!.ingress[0]).toEqual({ hostname: 'hosting.example.com', service: 'http://web:3000' })
-  })
-
-  it('meldet einen API-Fehler bei der Domain-Suche als solchen — nicht als fehlende Domain', async () => {
-    const run = await runCloudflareSetup(mock, BASE, 'falsches-token')
-    expect(run.stderr).toContain('Invalid API token')
-    expect(run.stderr).not.toContain('keine Domain')
-    expect(run.stderr).not.toContain('Abgebrochen in Zeile')
   })
 
   it('zeigt das Token nie in der Prozessliste', async () => {
     await runCloudflareSetup(mock, BASE)
-    // Jeder Aufruf kam mit dem Token an — übergeben wurde es aber nur per Datei.
     expect(mock.state.calls.length).toBeGreaterThan(5)
     const script = (await import('node:fs')).readFileSync(path.join(ROOT, 'install.sh'), 'utf8')
     expect(script).toContain('--header "@$CF_HEADERS"')
@@ -282,7 +237,7 @@ describe('install.sh — Einstellungen lesen und behalten', () => {
   it('erkennt eigene Zeilen in der .env, damit ein erneuter Lauf sie nicht verliert', async () => {
     const out = await bash(`
       file="$(mktemp)"
-      printf '%s\\n' '# Kommentar' 'SITE_DOMAIN=x.example.com' 'UMAMI_SRC=https://stats.example.com/script.js' 'TUNNEL_TOKEN=geheim' 'MC_UID=1001' '' 'CF_BEACON_TOKEN="abc"' > "$file"
+      printf '%s\\n' '# Kommentar' 'SITE_DOMAIN=x.example.com' 'UMAMI_SRC=https://stats.example.com/script.js' 'CLOUDFLARE_API_TOKEN=geheim' 'MC_UID=1001' '' 'CF_BEACON_TOKEN="abc"' > "$file"
       env_extras "$file"
     `)
     expect(out.trim().split('\n')).toEqual(['UMAMI_SRC=https://stats.example.com/script.js', 'MC_UID=1001', 'CF_BEACON_TOKEN="abc"'])

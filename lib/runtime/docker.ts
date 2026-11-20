@@ -107,7 +107,14 @@ async function ensureNetwork(): Promise<void> {
   const existing = await docker('GET', `/networks/${config.docker.network}`)
   if (existing.status === 200) return
   expectOk(
-    await docker('POST', '/networks/create', { body: { Name: config.docker.network, Driver: 'bridge' } }),
+    await docker('POST', '/networks/create', {
+      body: {
+        Name: config.docker.network,
+        Driver: 'bridge',
+        // Welten sollen einander nicht erreichen können — nur das Internet und, über ihren Port, die Spieler.
+        Options: { 'com.docker.network.bridge.enable_icc': 'false' },
+      },
+    }),
     'Netzwerk anlegen',
     [409],
   )
@@ -137,7 +144,6 @@ async function removeContainer(name: string): Promise<void> {
 }
 
 function containerSpec(world: World): Record<string, unknown> {
-  const address = `${world.host_label}.${config.serverDomain}`
   const whitelist = whitelistNames(world.id)
   // Der Container darf etwas mehr als die Java-Halde belegen (Metaspace, Threads, Netty).
   const heapMiB = Math.max(1024, config.ramMiB - 512)
@@ -182,18 +188,13 @@ function containerSpec(world: World): Record<string, unknown> {
     Image: imageFor(world),
     User: `${config.docker.uid}:${config.docker.gid}`,
     Env: Object.entries(env).map(([key, value]) => `${key}=${value}`),
-    Labels: {
-      'aboutmee.world': world.id,
-      'mc-router.host': address,
-      'mc-router.port': '25565',
-      'mc-router.network': config.docker.network,
-    },
+    Labels: { 'aboutmee.world': world.id },
     StopTimeout: STOP_SECONDS,
-    // Die eingebaute Prüfung des Images spricht kein PROXY-Protokoll und würde den Server dauerhaft als
-    // „unhealthy“ melden. Ob er bereit ist, erkennt der Treiber selbst (siehe state()).
-    Healthcheck: { Test: ['NONE'] },
+    ExposedPorts: { '25565/tcp': {} },
     HostConfig: {
       Binds: [`${path.join(config.docker.hostDataDir, 'worlds', world.id)}:/data`],
+      // Im Container lauscht der Server immer auf 25565; nach außen hat jede Welt ihren eigenen Port.
+      PortBindings: { '25565/tcp': [{ HostPort: String(world.port) }] },
       NetworkMode: config.docker.network,
       RestartPolicy: { Name: 'no' },
       Memory: memoryBytes,
@@ -208,6 +209,7 @@ function containerSpec(world: World): Record<string, unknown> {
 }
 
 async function launch(world: World): Promise<void> {
+  if (world.port === null) throw new Error('Der Welt ist kein Port zugewiesen.')
   const name = containerName(world)
   const dir = path.join(config.dataDir, 'worlds', world.id)
   fs.mkdirSync(dir, { recursive: true })

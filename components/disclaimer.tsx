@@ -28,9 +28,6 @@ export function SlimFooter() {
           <a href="/datenschutz" className="hover:text-ink">
             Datenschutz
           </a>
-          <a href="/bildnachweise" className="hover:text-ink">
-            Bildnachweise
-          </a>
           <a href="/hilfe" className="hover:text-ink">
             Feedback &amp; Hilfe
           </a>

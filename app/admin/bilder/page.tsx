@@ -11,8 +11,8 @@ export default async function AdminImagesPage() {
       <p className="max-w-[680px] text-[14px] text-ink-dim">
         Lade hier deine eigenen Minecraft-Screenshots hoch (in Minecraft mit <kbd className="bg-panel-2 px-1.5 font-mono">F2</kbd>{' '}
         aufnehmen). JPG, PNG oder WebP bis 6 MB, am besten im Querformat mit mindestens 1920 Pixeln Breite. Nimm nur
-        Bilder, die du selbst gemacht hast oder ausdrücklich verwenden darfst. Ein eigenes Bild ersetzt das
-        mitgelieferte; dessen Eintrag verschwindet dann automatisch aus den Bildnachweisen.
+        Bilder, die du selbst gemacht hast oder ausdrücklich verwenden darfst. Solange ein Platz leer ist, zeigt
+        die Seite dort eine neutrale Fläche; ohne Welt-Bilder haben Welten kein Titelbild.
       </p>
       <ul className="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
         {IMAGE_SLOTS.map((slot) => (

@@ -267,6 +267,13 @@
   }
 }
 
+/* Platzhalter für ein Titelbild, solange keines hochgeladen ist. */
+.cover-empty {
+  background:
+    radial-gradient(120% 140% at 85% 0%, color-mix(in srgb, var(--color-accent) 16%, transparent), transparent 60%),
+    linear-gradient(160deg, var(--color-panel-2), var(--color-base-soft));
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);

@@ -27,6 +27,11 @@ type Memory = {
   logs: { at: number; lines: string[] } | null
   players: { at: number; names: string[] } | null
   cpu: { total: number; system: number } | null
+  /**
+   * Womit der laufende Container gestartet wurde. Ein geändertes Paket gilt erst ab dem nächsten Start —
+   * bis dahin rechnen Anzeige und Spielerliste mit diesen Werten.
+   */
+  limits: { cpus: number; ramMiB: number; maxPlayers: number } | null
 }
 
 type Globals = { __amDocker?: Map<string, Memory> }
@@ -46,6 +51,7 @@ function memoryOf(worldId: string): Memory {
       logs: null,
       players: null,
       cpu: null,
+      limits: null,
     }
     globals.__amDocker.set(worldId, memory)
   }
@@ -232,7 +238,24 @@ async function launch(world: World): Promise<void> {
   expectOk(await docker('POST', `/containers/${name}/start`), 'Container starten', [304])
 }
 
-type Inspect = { State: { Running: boolean } }
+type Inspect = {
+  State: { Running: boolean }
+  HostConfig?: { NanoCpus?: number; Memory?: number }
+  Config?: { Env?: string[] }
+}
+
+/** Liest aus der Beschreibung des Containers, mit welchen Grenzen er läuft. */
+function limitsOf(inspect: Inspect, world: World): NonNullable<Memory['limits']> {
+  const plan = worldPlan(world)
+  const nano = inspect.HostConfig?.NanoCpus
+  const bytes = inspect.HostConfig?.Memory
+  const players = Number.parseInt(inspect.Config?.Env?.find((entry) => entry.startsWith('MAX_PLAYERS='))?.slice('MAX_PLAYERS='.length) ?? '', 10)
+  return {
+    cpus: nano && nano > 0 ? nano / 1e9 : Math.min(plan.cpus, hostCapacity().cpus),
+    ramMiB: bytes && bytes > 0 ? Math.round(bytes / (1024 * 1024)) : plan.ramMiB,
+    maxPlayers: Number.isInteger(players) && players > 0 ? players : plan.maxPlayers,
+  }
+}
 
 async function fetchLogs(world: World, memory: Memory): Promise<string[]> {
   const now = Date.now()
@@ -345,6 +368,7 @@ export const dockerDriver: RuntimeDriver = {
       forget(world.id)
       return 'stopped'
     }
+    memory.limits = limitsOf(inspect, world)
     if (memory.stopping) return 'stopping'
     if (memory.online) return 'online'
 
@@ -371,7 +395,7 @@ export const dockerDriver: RuntimeDriver = {
     try {
       const { output, exitCode } = await exec(containerName(world), ['rcon-cli', 'list'], 4000)
       if (exitCode !== 0) throw new Error('rcon-cli antwortet nicht')
-      const names = parsePlayerList(output, worldPlan(world).maxPlayers)
+      const names = parsePlayerList(output, memory.limits?.maxPlayers ?? worldPlan(world).maxPlayers)
       memory.players = { at: now, names }
       return names
     } catch {
@@ -401,11 +425,12 @@ export const dockerDriver: RuntimeDriver = {
       const cores = stats.cpu_stats?.online_cpus ?? 1
       // Anteil an der erlaubten Obergrenze, nicht an der ganzen Maschine.
       const used = ((total - previous.total) / (system - previous.system)) * cores
-      cpuPercent = Math.min(100, Math.round((used / Math.min(worldPlan(world).cpus, hostCapacity().cpus)) * 100))
+      const allowed = memory.limits?.cpus ?? Math.min(worldPlan(world).cpus, hostCapacity().cpus)
+      cpuPercent = Math.min(100, Math.round((used / allowed) * 100))
     }
     const cache = stats.memory_stats?.stats?.inactive_file ?? stats.memory_stats?.stats?.total_inactive_file ?? 0
     const ramMiB = Math.max(0, Math.round(((stats.memory_stats?.usage ?? 0) - cache) / (1024 * 1024)))
-    return { cpuPercent, ramMiB }
+    return { cpuPercent, ramMiB, ramLimitMiB: memory.limits?.ramMiB ?? worldPlan(world).ramMiB }
   },
 
   async logs(world: World): Promise<string[]> {

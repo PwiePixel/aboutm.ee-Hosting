@@ -20,6 +20,9 @@ type Instance = {
   logs: string[]
   logFile: string
   players: string[]
+  /** Das Paket, mit dem die Welt gestartet wurde — Änderungen gelten erst ab dem nächsten Start. */
+  ramLimitMiB: number
+  maxPlayers: number
 }
 
 const START_MS = 8000
@@ -119,6 +122,8 @@ export const simulatedDriver: RuntimeDriver = {
       logs: [],
       logFile,
       players: [],
+      ramLimitMiB: worldPlan(world).ramMiB,
+      maxPlayers: worldPlan(world).maxPlayers,
     }
     const mode = world.gamemode.toUpperCase()
     queue(instance, now, [
@@ -176,7 +181,8 @@ export const simulatedDriver: RuntimeDriver = {
     const starting = instance.phase === 'starting'
     return {
       cpuPercent: Math.round(starting ? 55 + wobble * 30 : 3 + wobble * 6),
-      ramMiB: Math.round(Math.min(worldPlan(world).ramMiB * 0.55, 420 + age * 18) + wobble * 40),
+      ramMiB: Math.round(Math.min(instance.ramLimitMiB * 0.55, 420 + age * 18) + wobble * 40),
+      ramLimitMiB: instance.ramLimitMiB,
     }
   },
 
@@ -198,7 +204,7 @@ export const simulatedDriver: RuntimeDriver = {
       case 'list':
         reply(
           instance,
-          `There are ${instance.players.length} of a max of ${worldPlan(world).maxPlayers} players online: ${instance.players.join(', ')}`,
+          `There are ${instance.players.length} of a max of ${instance.maxPlayers} players online: ${instance.players.join(', ')}`,
         )
         break
       // Nur im Vorschau-Modus: so tun, als käme oder ginge ein Spieler — zum Ausprobieren von Statistik und Auto-Pause.

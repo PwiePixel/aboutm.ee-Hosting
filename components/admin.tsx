@@ -404,14 +404,17 @@ export function PlanForm({
   host: { ramMiB: number; cpus: number }
 }) {
   const [state, action] = useActionState(saveWorldPlanAction, EMPTY)
+  // Nach „Zurücksetzen“ gelten die Eingaben eines zuvor abgelehnten Versuchs nicht mehr.
+  const [dismissed, setDismissed] = useState<unknown>(null)
+  const typed = state === dismissed ? undefined : state.values
   const fields: Array<{ name: string; label: string; unit: string; value: number; min: number; max: number; step: number; hint: string }> = [
     {
       name: 'ramGiB',
       label: 'Arbeitsspeicher',
       unit: 'GiB',
       value: plan.ramMiB / 1024,
-      min: 2,
-      max: Math.min(64, Math.floor(host.ramMiB / 512) / 2),
+      min: Math.min(2, standard.ramMiB / 1024),
+      max: Math.max(Math.min(64, Math.floor(host.ramMiB / 512) / 2), standard.ramMiB / 1024),
       step: 0.5,
       hint: `Standard: ${gib(standard.ramMiB)} GiB · dieser Server hat ${gib(host.ramMiB)} GiB`,
     },
@@ -430,9 +433,10 @@ export function PlanForm({
       label: 'CPU-Kerne',
       unit: 'Kerne',
       value: plan.cpus,
-      min: 0.5,
-      max: Math.min(64, host.cpus),
-      step: 0.5,
+      min: Math.min(0.5, standard.cpus),
+      max: Math.max(Math.min(64, host.cpus), standard.cpus),
+      // „any“, falls der Standard selbst kein Vielfaches von 0,5 ist.
+      step: Number.isInteger(standard.cpus * 2) ? 0.5 : 0.05,
       hint: `Standard: ${standard.cpus.toLocaleString('de-DE')} · dieser Server hat ${host.cpus}`,
     },
     {
@@ -486,7 +490,7 @@ export function PlanForm({
               max={field.max}
               step={field.step}
               required
-              defaultValue={field.value}
+              defaultValue={typed?.[field.name] ?? field.value}
               className="field"
               aria-describedby={`${field.name}-hint`}
             />
@@ -505,7 +509,11 @@ export function PlanForm({
             title="Zurück auf das Standardpaket?"
             text={<>Die Welt bekommt wieder die Werte des kostenlosen Pakets. Ihre Dateien bleiben erhalten.</>}
             confirmLabel="Zurücksetzen"
-            action={() => resetWorldPlanAction(worldId)}
+            action={async () => {
+              const result = await resetWorldPlanAction(worldId)
+              if (!result.error) setDismissed(state)
+              return result
+            }}
           >
             Auf Standard zurücksetzen
           </ConfirmButton>
@@ -524,7 +532,7 @@ export function ImprintForm({ imprint }: { imprint: Imprint }) {
     { name: 'city', label: 'PLZ und Ort', required: true },
     { name: 'country', label: 'Land', required: true, autoComplete: 'country-name' },
     { name: 'email', label: 'E-Mail-Adresse', type: 'email', required: true, hint: 'Auch für Meldungen rechtswidriger Inhalte.', autoComplete: 'email' },
-    { name: 'phone', label: 'Telefon', type: 'tel', hint: 'Freiwillig — ohne Angabe erscheint keine Zeile.', autoComplete: 'tel' },
+    { name: 'phone', label: 'Telefon', type: 'tel', hint: 'Freiwillig — ohne Angabe erscheint keine Zeile. Nur Ziffern, Leerzeichen und + ( ) / . -', autoComplete: 'tel' },
   ]
   return (
     <form action={action} className="space-y-5">
@@ -540,7 +548,7 @@ export function ImprintForm({ imprint }: { imprint: Imprint }) {
               type={field.type ?? 'text'}
               required={field.required}
               maxLength={200}
-              defaultValue={imprint[field.name]}
+              defaultValue={state.values?.[field.name] ?? imprint[field.name]}
               autoComplete={field.autoComplete}
               className="field"
               aria-describedby={field.hint ? `imprint-${field.name}-hint` : undefined}

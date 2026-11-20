@@ -155,21 +155,31 @@ export async function saveWorldPlanAction(_previous: ActionState, formData: Form
     backupGiB: numberField(formData, 'backupGiB'),
     autoPauseMinutes: numberField(formData, 'autoPauseMinutes'),
   }
+  // Bei einem Fehler die Eingaben zurückgeben — das Formular würde sie sonst auf die gespeicherten Werte zurücksetzen.
+  const typed: Record<string, string> = {}
+  for (const name of ['ramGiB', 'diskGiB', 'cpus', 'maxPlayers', 'backupGiB', 'autoPauseMinutes']) {
+    typed[name] = String(formData.get(name) ?? '').slice(0, 20)
+  }
   if (Number.isFinite(values.ramMiB) && values.ramMiB % 512 !== 0) {
-    return { error: 'Arbeitsspeicher: Bitte in Schritten von 0,5 GiB angeben.' }
+    return { error: 'Arbeitsspeicher: Bitte in Schritten von 0,5 GiB angeben.', values: typed }
   }
   const problem = planProblem(values)
-  if (problem) return { error: problem }
+  if (problem) return { error: problem, values: typed }
   setWorldPlan(world.id, values)
 
   revalidatePath('/admin', 'layout')
   revalidatePath(`/app/welten/${world.id}`, 'layout')
   revalidatePath('/app')
   const running = world.status !== 'paused'
+  const hint =
+    values.backupGiB < values.diskGiB
+      ? ' Hinweis: Der Backup-Speicher ist kleiner als der Speicherplatz — eine volle Welt lässt sich dann nicht sichern.'
+      : ''
   return {
-    ok: running
-      ? 'Gespeichert. Speicherplatz, Backups und Auto-Pause gelten sofort; Arbeitsspeicher, CPU und Spielerplätze ab dem nächsten Start der Welt.'
-      : 'Gespeichert. Das Paket gilt ab dem nächsten Start der Welt.',
+    ok:
+      (running
+        ? 'Gespeichert. Speicherplatz, Backups und Auto-Pause gelten sofort; Arbeitsspeicher, CPU und Spielerplätze ab dem nächsten Start der Welt.'
+        : 'Gespeichert. Das Paket gilt ab dem nächsten Start der Welt.') + hint,
   }
 }
 
@@ -194,10 +204,12 @@ export async function saveImprintAction(_previous: ActionState, formData: FormDa
     values[field] = String(formData.get(field) ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 200)
   }
   if (!values.name || !values.street || !values.city || !values.country) {
-    return { error: 'Name, Straße, Ort und Land gehören ins Impressum — bitte alle vier ausfüllen.' }
+    return { error: 'Name, Straße, Ort und Land gehören ins Impressum — bitte alle vier ausfüllen.', values }
   }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(values.email)) return { error: 'Bitte eine gültige E-Mail-Adresse angeben.' }
-  if (values.phone && !/^[0-9+()\/ .-]{5,40}$/.test(values.phone)) return { error: 'Die Telefonnummer enthält ungültige Zeichen.' }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(values.email)) return { error: 'Bitte eine gültige E-Mail-Adresse angeben.', values }
+  if (values.phone && !/^[0-9+()\/ .-]{5,40}$/.test(values.phone)) {
+    return { error: 'Telefon: Bitte nur Ziffern, Leerzeichen und die Zeichen + ( ) / . - verwenden.', values }
+  }
   saveImprint(values)
   revalidatePath('/impressum')
   revalidatePath('/datenschutz')

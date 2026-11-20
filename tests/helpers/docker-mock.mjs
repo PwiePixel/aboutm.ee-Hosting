@@ -77,7 +77,7 @@ export function startDockerMock(socketPath, { createDelayMs = 0, stopDelayMs = 5
       if ((match = path.match(/^\/containers\/([^/]+)\/json$/)) && request.method === 'GET') {
         const container = state.containers.get(match[1])
         if (!container) return send(404, { message: 'No such container' })
-        return send(200, { State: { Running: container.running } })
+        return send(200, { State: { Running: container.running }, HostConfig: container.spec.HostConfig, Config: { Env: container.spec.Env } })
       }
 
       if ((match = path.match(/^\/containers\/([^/]+)\/logs$/)) && request.method === 'GET') {

@@ -192,7 +192,7 @@ export function LiveUsage({ kind, ramLimitMiB }: { kind: 'cpu' | 'ram'; ramLimit
   const gib = (value: number) => (value / 1024).toLocaleString('de-DE', { maximumFractionDigits: 1 })
   return (
     <>
-      {gib(live.ramMiB)} von {gib(ramLimitMiB)} GiB
+      {gib(live.ramMiB)} von {gib(live.ramLimitMiB ?? ramLimitMiB)} GiB
     </>
   )
 }

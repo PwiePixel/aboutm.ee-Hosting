@@ -21,9 +21,11 @@ export type Plan = {
   autoPauseMinutes: number
   /** `true`, sobald irgendetwas vom Standardpaket abweicht. */
   upgraded: boolean
+  /** Wie das Paket heißt: „Upgrade“ nur, wenn nichts schlechter ist als im Standardpaket. */
+  label: 'Kostenlos' | 'Upgrade' | 'Angepasst'
 }
 
-export type PlanValues = Omit<Plan, 'upgraded'>
+export type PlanValues = Omit<Plan, 'upgraded' | 'label'>
 type PlanColumns = Pick<World, 'ram_mib' | 'disk_gib' | 'cpus' | 'max_players' | 'backup_gib' | 'auto_pause_minutes'>
 
 export const PLAN_RANGES: Record<keyof PlanValues, { min: number; max: number }> = {
@@ -56,8 +58,12 @@ export function worldPlan(world: PlanColumns): Plan {
     backupGiB: world.backup_gib ?? base.backupGiB,
     autoPauseMinutes: world.auto_pause_minutes ?? base.autoPauseMinutes,
   }
-  const upgraded = (Object.keys(plan) as Array<keyof PlanValues>).some((key) => plan[key] !== base[key])
-  return { ...plan, upgraded }
+  const keys = Object.keys(plan) as Array<keyof PlanValues>
+  const upgraded = keys.some((key) => plan[key] !== base[key])
+  // Bei der Auto-Pause ist „nie“ (0) das Beste, sonst zählt die längere Frist.
+  const rank = (key: keyof PlanValues, value: number) => (key === 'autoPauseMinutes' && value === 0 ? Number.POSITIVE_INFINITY : value)
+  const worse = keys.some((key) => rank(key, plan[key]) < rank(key, base[key]))
+  return { ...plan, upgraded, label: !upgraded ? 'Kostenlos' : worse ? 'Angepasst' : 'Upgrade' }
 }
 
 /** Das Paket einer Welt anhand ihrer Kennung — für Stellen, die nur die Kennung haben. */
@@ -77,19 +83,27 @@ export function planProblem(values: PlanValues): string | null {
     backupGiB: 'Backup-Speicher',
     autoPauseMinutes: 'Auto-Pause',
   }
+  // Was dem Standard entspricht, ist immer in Ordnung — es wird ohnehin nicht eigens gespeichert. So lässt
+  // sich ein Paket auch dann ändern, wenn der Standard selbst außerhalb dieser Regeln liegt (etwa mehr
+  // CPU-Kerne als der Server hat; beim Start wird das ohnehin auf das Vorhandene begrenzt).
+  const base = defaultPlan()
+  const changed = (key: keyof PlanValues) => values[key] !== base[key]
   for (const key of Object.keys(labels) as Array<keyof PlanValues>) {
+    if (!changed(key)) continue
     const value = values[key]
     const range = PLAN_RANGES[key]
     if (!Number.isFinite(value) || value < range.min || value > range.max) return `${labels[key]}: Der Wert liegt außerhalb des erlaubten Bereichs.`
   }
-  if (!Number.isInteger(values.ramMiB)) return 'Arbeitsspeicher: Bitte in Schritten von 0,5 GiB angeben.'
+  if (changed('ramMiB') && !Number.isInteger(values.ramMiB)) return 'Arbeitsspeicher: Bitte in Schritten von 0,5 GiB angeben.'
   for (const key of ['diskGiB', 'maxPlayers', 'backupGiB', 'autoPauseMinutes'] as const) {
-    if (!Number.isInteger(values[key])) return `${labels[key]}: Bitte eine ganze Zahl angeben.`
+    if (changed(key) && !Number.isInteger(values[key])) return `${labels[key]}: Bitte eine ganze Zahl angeben.`
   }
-  if (values.autoPauseMinutes !== 0 && values.autoPauseMinutes < 5) return 'Auto-Pause: 0 (nie) oder mindestens 5 Minuten.'
+  if (changed('autoPauseMinutes') && values.autoPauseMinutes !== 0 && values.autoPauseMinutes < 5) {
+    return 'Auto-Pause: 0 (nie) oder mindestens 5 Minuten.'
+  }
   const host = hostCapacity()
-  if (values.cpus > host.cpus) return `CPU-Kerne: Dieser Server hat nur ${host.cpus}.`
-  if (values.ramMiB > host.ramMiB) return `Arbeitsspeicher: Dieser Server hat nur ${Math.floor(host.ramMiB / 1024)} GiB.`
+  if (changed('cpus') && values.cpus > host.cpus) return `CPU-Kerne: Dieser Server hat nur ${host.cpus}.`
+  if (changed('ramMiB') && values.ramMiB > host.ramMiB) return `Arbeitsspeicher: Dieser Server hat nur ${Math.floor(host.ramMiB / 1024)} GiB.`
   return null
 }
 

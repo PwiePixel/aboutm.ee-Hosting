@@ -35,7 +35,7 @@ export default async function WorldOverviewPage({
     ['Paper-Build', String(world.paper_build)],
     ['Spielmodus', gamemodeLabel(world.gamemode)],
     ['Schwierigkeit', difficultyLabel(world.difficulty)],
-    ['Speicherprofil', `${formatMiBAsGiB(plan.ramMiB)} · ${plan.upgraded ? 'Upgrade' : 'kostenlos'}`],
+    ['Speicherprofil', `${formatMiBAsGiB(plan.ramMiB)} · ${plan.label === 'Kostenlos' ? 'kostenlos' : plan.label}`],
     ['CPU', <LiveUsage key="cpu" kind="cpu" ramLimitMiB={plan.ramMiB} />],
     ['RAM', <LiveUsage key="ram" kind="ram" ramLimitMiB={plan.ramMiB} />],
     ['Dateien', `${formatBytes(worldDiskUsage(world.id))} von ${plan.diskGiB} GiB`],

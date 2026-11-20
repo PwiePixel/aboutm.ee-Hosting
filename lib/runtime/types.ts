@@ -39,7 +39,8 @@ export type World = {
 /** Was der Treiber über den tatsächlichen Prozess weiß. */
 export type RuntimeState = 'stopped' | 'starting' | 'online' | 'stopping'
 
-export type RuntimeStats = { cpuPercent: number; ramMiB: number }
+/** `ramLimitMiB`: so viel Arbeitsspeicher hat der laufende Server tatsächlich — nicht, was inzwischen im Paket steht. */
+export type RuntimeStats = { cpuPercent: number; ramMiB: number; ramLimitMiB: number }
 
 /**
  * Ein Treiber führt Welten tatsächlich aus. Die Website kennt nur diese Schnittstelle —

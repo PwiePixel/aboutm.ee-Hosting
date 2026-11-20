@@ -47,7 +47,7 @@ export default async function AdminWorldsPage() {
                   <Link href={`/admin/welten/${world.id}`} className="font-semibold underline-offset-4 hover:text-accent hover:underline">
                     {formatMiBAsGiB(world.plan.ramMiB)} · {world.plan.diskGiB} GiB
                   </Link>
-                  <p className="text-[12px] text-ink-faint">{world.plan.upgraded ? 'Upgrade' : 'Standard'} · ändern</p>
+                  <p className="text-[12px] text-ink-faint">{world.plan.upgraded ? world.plan.label : 'Standard'} · ändern</p>
                 </td>
                 <td className="px-4 py-3 text-ink-dim">{world.version}</td>
                 <td className="whitespace-nowrap px-4 py-3 text-ink-dim">{formatDateTime(world.createdAt)}</td>

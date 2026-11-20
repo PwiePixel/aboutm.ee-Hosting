@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 // @ts-expect-error — reines JavaScript-Hilfsmodul ohne Typen
 import { startDockerMock } from './helpers/docker-mock.mjs'
 
@@ -87,6 +87,10 @@ describe('Docker-Treiber', () => {
 
   it('startet eine hochgestufte Welt mit den Werten ihres Pakets', async () => {
     const plan = await import('@/lib/plan')
+    // Unabhängig von der Maschine, auf der die Tests laufen: 16 GiB und 4 Kerne.
+    const os = (await import('node:os')).default
+    vi.spyOn(os, 'totalmem').mockReturnValue(16 * 1024 ** 3)
+    vi.spyOn(os, 'availableParallelism').mockReturnValue(4)
     const world = newWorld()
     plan.setWorldPlan(world.id, { ...plan.defaultPlan(), ramMiB: 4096, cpus: 1, maxPlayers: 50 })
     await lib.requestStart(lib.getWorld(world.user_id, world.id)!)
@@ -102,13 +106,29 @@ describe('Docker-Treiber', () => {
     await lib.requestStop(world)
     await ticksUntil(world, 'paused')
 
+    // Wird das Paket im laufenden Betrieb geändert, gelten bis zum nächsten Start die Werte des Containers.
+    await lib.requestStart(lib.getWorld(world.user_id, world.id)!)
+    await ticksUntil(world, 'online')
+    plan.setWorldPlan(world.id, { ...plan.defaultPlan(), ramMiB: 8192, maxPlayers: 5 })
+    const { runtime } = await import('@/lib/runtime')
+    const running = lib.getWorld(world.user_id, world.id)!
+    expect((await runtime().stats(running))!.ramLimitMiB).toBe(4096)
+    mock.state.players = Array.from({ length: 30 }, (_, i) => `Spieler${i}`).join(', ')
+    ;(globalThis as { __amDocker?: Map<string, { players: unknown }> }).__amDocker!.get(world.id)!.players = null
+    expect(await runtime().players(running)).toHaveLength(30) // der Server lässt weiter 50 zu
+    mock.state.players = ''
+    await lib.requestStop(world)
+    await ticksUntil(world, 'paused')
+    plan.setWorldPlan(world.id, { ...plan.defaultPlan(), ramMiB: 4096, cpus: 1, maxPlayers: 50 })
+
     // Mehr Kerne, als der Server hat, lehnt Docker ab — der Start begrenzt deshalb auf das Vorhandene.
     database.db().prepare('UPDATE worlds SET cpus = 9999 WHERE id = ?').run(world.id)
     await lib.requestStart(lib.getWorld(world.user_id, world.id)!)
     await ticksUntil(world, 'online')
-    expect(container(world)!.spec.HostConfig.NanoCpus).toBe(plan.hostCapacity().cpus * 1e9)
+    expect(container(world)!.spec.HostConfig.NanoCpus).toBe(4e9)
     await lib.requestStop(world)
     await ticksUntil(world, 'paused')
+    vi.restoreAllMocks()
   })
 
   it('stellt vor dem Start sicher, dass Paper direkte Verbindungen annimmt', async () => {

@@ -62,6 +62,20 @@ export async function createBackup(world: World, kind: 'manual' | 'auto'): Promi
   // Alle Backups einer Welt zusammen dürfen höchstens so viel belegen, wie ihr Paket vorsieht.
   const backupGiB = planOf(world.id).backupGiB
   const quotaBytes = backupGiB * 1024 ** 3
+  // Passt das neue Backup selbst dann nicht, wenn alle automatischen wichen? Dann gar nicht erst welche
+  // löschen — sonst wären am Ende die alten weg und kein neues da.
+  const all = listBackups(world.id)
+  const keptBytes = all.filter((entry) => kind === 'manual' || entry.kind !== 'auto').reduce((sum, entry) => sum + entry.size_bytes, 0)
+  if (worldBytes > quotaBytes) {
+    throw new BackupError(
+      `Deine Welt ist größer als der Backup-Speicher ihres Pakets (${backupGiB} GiB) — sie lässt sich gerade nicht sichern.`,
+    )
+  }
+  if (kind === 'auto' && keptBytes + worldBytes > quotaBytes) {
+    throw new BackupError(
+      `Für die Backups dieser Welt stehen ${backupGiB} GiB bereit — neben deinen eigenen Backups ist für ein automatisches kein Platz mehr.`,
+    )
+  }
   if (kind === 'auto') {
     // Älteste automatische Backups weichen, bis das neue Platz hat.
     const automatic = listBackups(world.id)

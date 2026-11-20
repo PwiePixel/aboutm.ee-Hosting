@@ -41,7 +41,7 @@ export default async function SettingsPage({ params }: { params: Promise<{ id: s
   const plan = worldPlan(world)
   const fixed: Array<[string, string]> = [
     ['Server-Software', `Paper ${world.version} · Build ${world.paper_build}`],
-    ['Paket', plan.upgraded ? 'Upgrade' : 'Kostenlos'],
+    ['Paket', plan.label],
     ['Arbeitsspeicher', formatMiBAsGiB(plan.ramMiB)],
     ['Speicherplatz', `${plan.diskGiB} GiB`],
     ['Spielerplätze', String(plan.maxPlayers)],

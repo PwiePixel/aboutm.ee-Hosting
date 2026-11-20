@@ -11,6 +11,8 @@ export type LiveStatus = {
   players: string[]
   cpuPercent: number | null
   ramMiB: number | null
+  /** Arbeitsspeicher, mit dem der Server gerade läuft (kann vom inzwischen geänderten Paket abweichen). */
+  ramLimitMiB: number | null
   slotsFree: number
   pauseReason: string | null
   preview: boolean
@@ -32,6 +34,7 @@ export async function buildStatus(world: World): Promise<LiveStatus> {
     players,
     cpuPercent: stats?.cpuPercent ?? null,
     ramMiB: stats?.ramMiB ?? null,
+    ramLimitMiB: stats?.ramLimitMiB ?? null,
     slotsFree: slotsFree(),
     pauseReason: world.pause_reason,
     preview: driver.preview,

@@ -26,7 +26,7 @@ export default async function AdminWorldPlanPage({ params }: { params: Promise<{
         <h2 className="heading text-[24px]">{world.name}</h2>
         <StatusBadge status={world.status} />
         <span className="border border-line px-2 py-0.5 font-mono text-[12px] uppercase tracking-[0.08em] text-ink-dim">
-          {world.plan.upgraded ? 'Upgrade' : 'Standardpaket'}
+          {world.plan.upgraded ? world.plan.label : 'Standardpaket'}
         </span>
       </div>
       <p className="mt-1 text-[14px] text-ink-dim">

@@ -56,6 +56,16 @@ function newUser(): string {
 }
 const fresh = (world: { id: string; user_id: string }) => worlds.getWorld(world.user_id, world.id)!
 const srv = () => cloudflare.state.dns.filter((record) => record.type === 'SRV')
+/** Lässt die Sperrfrist nach dem Entfernen eines Eintrags ablaufen (im Betrieb: fünf Minuten). */
+const expireHolds = () => database.db().prepare('UPDATE dns_cleanup SET removed_at = removed_at - 6 * 60000 WHERE removed_at IS NOT NULL').run()
+const pending = () => database.db().prepare('SELECT name, record_id, port FROM dns_cleanup WHERE removed_at IS NULL').all()
+async function deleteAll() {
+  for (const row of database.db().prepare('SELECT * FROM worlds').all() as Array<{ id: string; user_id: string }>) {
+    await worlds.deleteWorld(fresh(row))
+  }
+  expireHolds()
+  await dns.dnsMaintenance()
+}
 
 describe('Adresse einer Welt', () => {
   it('bekommt einen eigenen Port und einen SRV-Eintrag, der auf den Server zeigt', async () => {
@@ -82,6 +92,7 @@ describe('Adresse einer Welt', () => {
 
     await worlds.deleteWorld(fresh(world))
     expect(srv()).toHaveLength(0)
+    await deleteAll()
   })
 
   it('vergibt jeder Welt einen anderen Port, gibt ihn nach dem Löschen wieder frei und meldet einen vollen Bereich', async () => {
@@ -93,8 +104,11 @@ describe('Adresse einer Welt', () => {
     expect(() => worlds.createWorld(user, INPUT)).toThrow(/Adressen vergeben/)
 
     await worlds.deleteWorld(created[2]!)
+    // Direkt nach dem Löschen bleibt der Port noch gesperrt: Resolver kennen den alten Eintrag noch kurz.
+    expect(() => worlds.createWorld(user, INPUT)).toThrow(/Adressen vergeben/)
+    expireHolds()
     expect(worlds.createWorld(user, INPUT).port).toBe(25602)
-    for (const world of worlds.listWorlds(user)) await worlds.deleteWorld(world)
+    await deleteAll()
   })
 
   it('bleibt nutzbar, wenn Cloudflare gerade nicht antwortet — und holt den Eintrag später nach', async () => {
@@ -111,7 +125,7 @@ describe('Adresse einer Welt', () => {
     await dns.dnsMaintenance()
     expect(fresh(world).dns_record_id).not.toBeNull()
     expect(srv().map((record) => record.data!.port)).toContain(world.port)
-    await worlds.deleteWorld(fresh(world))
+    await deleteAll()
   })
 
   it('räumt einen Eintrag später weg, wenn das Löschen zunächst scheitert', async () => {
@@ -123,7 +137,7 @@ describe('Adresse einer Welt', () => {
     await worlds.deleteWorld(fresh(world)) // die Welt ist weg, der Eintrag noch da
     expect(worlds.getWorld(world.user_id, world.id)).toBeUndefined()
     expect(srv().some((record) => record.id === recordId)).toBe(true)
-    expect(database.db().prepare('SELECT record_id, port FROM dns_cleanup').all()).toEqual([{ record_id: recordId, port: world.port }])
+    expect(pending()).toEqual([{ name: dns.recordName(world), record_id: recordId, port: world.port }])
 
     // Solange der alte Name noch auf den Port zeigt, bekommt keine neue Welt diesen Port.
     const next = worlds.createWorld(newUser(), INPUT)
@@ -132,13 +146,120 @@ describe('Adresse einer Welt', () => {
     cloudflare.state.failDns = false
     await dns.dnsMaintenance()
     expect(srv().some((record) => record.id === recordId)).toBe(false)
-    expect(database.db().prepare('SELECT COUNT(*) AS n FROM dns_cleanup').get()).toEqual({ n: 0 })
-    // Danach ist der Port wieder frei.
+    expect(pending()).toEqual([])
+    // Nach der Sperrfrist ist der Port wieder frei.
     await worlds.deleteWorld(fresh(next))
+    expireHolds()
     expect(worlds.createWorld(newUser(), INPUT).port).toBe(world.port)
-    for (const row of database.db().prepare('SELECT * FROM worlds').all() as Array<{ id: string; user_id: string }>) {
-      await worlds.deleteWorld(fresh(row))
+    await deleteAll()
+  })
+
+  it('gibt den Port auch dann nicht frei, wenn während des Löschens schon die nächste Welt entsteht', async () => {
+    const world = worlds.createWorld(newUser(), INPUT)
+    await dns.ensureWorldRecord(world)
+    const recordId = fresh(world).dns_record_id
+    cloudflare.state.failDns = true
+    const deleting = worlds.deleteWorld(fresh(world)) // läuft noch — Cloudflare antwortet nicht
+    // Sobald die Welt aus der Datenbank verschwunden ist, legt jemand anderes eine neue an.
+    for (let i = 0; i < 200 && worlds.getWorld(world.user_id, world.id); i++) await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(worlds.getWorld(world.user_id, world.id)).toBeUndefined()
+    const other = worlds.createWorld(newUser(), INPUT)
+    expect(other.port).not.toBe(world.port)
+    await deleting
+    expect(pending()).toEqual([{ name: dns.recordName(world), record_id: recordId, port: world.port }])
+    cloudflare.state.failDns = false
+    await deleteAll()
+    expect(srv()).toHaveLength(0)
+  })
+
+  it('merkt Einträge gelöschter Welten auch vor, wenn der Cloudflare-Zugang inzwischen fehlt', async () => {
+    const { config } = await import('@/lib/config')
+    const world = worlds.createWorld(newUser(), INPUT)
+    await dns.ensureWorldRecord(world)
+    const token = config.cloudflare.token
+    ;(config.cloudflare as { token: string }).token = '' // wie nach dem Entfernen aus der .env
+    try {
+      expect(worlds.worldAddress(fresh(world))).toBe(`${world.host_label}.example.com`) // der Eintrag gilt ja weiter
+      await worlds.deleteWorld(fresh(world))
+      expect(srv()).toHaveLength(1)
+      expect(pending()).toHaveLength(1)
+      expect(worlds.createWorld(newUser(), INPUT).port).not.toBe(world.port)
+    } finally {
+      ;(config.cloudflare as { token: string }).token = token
     }
+    await dns.dnsMaintenance() // Zugang wieder da: der alte Eintrag verschwindet
+    expect(srv().filter((record) => record.name === dns.recordName(world))).toHaveLength(0)
+    await deleteAll()
+  })
+
+  it('zieht alle Einträge um, wenn sich die Domain der Welten oder die Adresse des Servers ändert', async () => {
+    const { config } = await import('@/lib/config')
+    const mutable = config as { serverDomain: string; nodeHost: string }
+    const world = worlds.createWorld(newUser(), INPUT)
+    await dns.ensureWorldRecord(world)
+    await dns.dnsMaintenance() // merkt sich den aktuellen Stand
+    const oldName = dns.recordName(world)
+
+    // Erst nur die Adresse des Servers: derselbe Eintrag bekommt das neue Ziel.
+    mutable.nodeHost = 'server2.example.com'
+    try {
+      await dns.dnsMaintenance()
+      expect(srv()).toHaveLength(1)
+      expect(srv()[0]).toMatchObject({ name: oldName, data: { target: 'server2.example.com', port: world.port } })
+      expect(fresh(world).dns_record_id).toBe(srv()[0]!.id)
+
+      // Dann die Domain der Welten: neuer Name, der alte Eintrag verschwindet.
+      mutable.serverDomain = 'welten.example.com'
+      await dns.dnsMaintenance()
+      expect(srv().map((record) => record.name)).toEqual([`_minecraft._tcp.${world.host_label}.welten.example.com`])
+      expect(worlds.worldAddress(fresh(world))).toBe(`${world.host_label}.welten.example.com`)
+      // Der Port der Welt war dabei nie gesperrt oder neu vergeben.
+      expect(fresh(world).port).toBe(world.port)
+    } finally {
+      mutable.nodeHost = 'node.example.com'
+      mutable.serverDomain = 'example.com'
+    }
+    await dns.dnsMaintenance()
+    expect(srv().map((record) => record.name)).toEqual([oldName])
+    await deleteAll()
+    expect(srv()).toHaveLength(0)
+  })
+
+  it('löscht beim Entfernen eines Kontos auch eine Welt, die währenddessen noch angelegt wurde', async () => {
+    const user = newUser()
+    const first = worlds.createWorld(user, INPUT)
+    await dns.ensureWorldRecord(first)
+    const deleting = worlds.deleteUserWithWorlds(user)
+    // Während die erste Welt gelöscht wird, legt dasselbe Konto in einem anderen Fenster noch eine an.
+    const late = worlds.createWorld(user, INPUT)
+    await dns.ensureWorldRecord(late)
+    await deleting
+    expect(database.db().prepare('SELECT COUNT(*) AS n FROM users WHERE id = ?').get(user)).toEqual({ n: 0 })
+    expect(database.db().prepare('SELECT COUNT(*) AS n FROM worlds WHERE user_id = ?').get(user)).toEqual({ n: 0 })
+    expect(srv()).toHaveLength(0)
+    expect(pending()).toEqual([])
+    await deleteAll()
+  })
+
+  it('übernimmt Welten aus älteren Ständen: Port sofort, laufende werden neu gestartet', async () => {
+    const paused = worlds.createWorld(newUser(), INPUT)
+    const running = worlds.createWorld(newUser(), INPUT)
+    database.db().prepare('UPDATE worlds SET port = NULL WHERE id IN (?, ?)').run(paused.id, running.id)
+    database.db().prepare(`UPDATE worlds SET status = 'online' WHERE id = ?`).run(running.id)
+
+    worlds.adoptLegacyWorlds()
+    expect(fresh(paused)).toMatchObject({ status: 'paused' })
+    expect(fresh(paused).port).not.toBeNull()
+    expect(fresh(running)).toMatchObject({ status: 'stopping', restart_pending: 1 })
+    expect(fresh(running).port).not.toBeNull()
+    expect(fresh(running).port).not.toBe(fresh(paused).port)
+
+    await dns.dnsMaintenance() // die Einträge stehen, bevor jemand die Welt startet
+    expect(worlds.worldAddress(fresh(paused))).toBe(`${paused.host_label}.example.com`)
+    worlds.adoptLegacyWorlds() // ein zweiter Lauf ändert nichts mehr
+    expect(fresh(running)).toMatchObject({ status: 'stopping', restart_pending: 1 })
+    database.db().prepare(`UPDATE worlds SET status = 'paused', restart_pending = 0 WHERE id = ?`).run(running.id)
+    await deleteAll()
   })
 
   it('räumt beim Löschen auch einen Eintrag weg, dessen Kennung nie gespeichert wurde', async () => {
@@ -152,6 +273,7 @@ describe('Adresse einer Welt', () => {
     expect(fresh(world).dns_record_id).toBeNull()
     await worlds.deleteWorld(fresh(world))
     expect(srv().filter((record) => record.name === dns.recordName(world))).toHaveLength(0)
+    await deleteAll()
   })
 
   it('übernimmt einen schon vorhandenen Eintrag und stellt ihn auf den richtigen Port', async () => {
@@ -168,5 +290,6 @@ describe('Adresse einer Welt', () => {
     expect(own[0]!.data).toMatchObject({ port: world.port, target: 'node.example.com' })
     await worlds.deleteWorld(fresh(world))
     expect(srv()).toHaveLength(0)
+    await deleteAll()
   })
 })

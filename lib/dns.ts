@@ -99,13 +99,13 @@ export async function ensureWorldRecord(world: World): Promise<boolean> {
   // Nur eintragen, wenn es die Welt noch gibt — sonst den eben angelegten Eintrag wieder wegräumen.
   const updated = db().prepare('UPDATE worlds SET dns_record_id = ? WHERE id = ?').run(id, world.id)
   if (updated.changes === 0) {
-    await removeWorldRecord(world)
+    await removeWorldRecord({ ...world, dns_record_id: id })
     return false
   }
   return true
 }
 
-/** Löscht alle SRV-Einträge unter dem Namen der Welt — auch einen, dessen Kennung nie gespeichert wurde. */
+/** Löscht alle SRV-Einträge unter einem Namen — auch einen, dessen Kennung nie gespeichert wurde. */
 async function deleteByName(name: string): Promise<void> {
   const found = await cloudflare<DnsRecord[]>('GET', `/dns_records?type=SRV&name.exact=${encodeURIComponent(name)}`)
   for (const record of found.result ?? []) {
@@ -113,64 +113,155 @@ async function deleteByName(name: string): Promise<void> {
   }
 }
 
+/** So lange bleibt ein Port nach dem Entfernen des Eintrags noch gesperrt — Resolver kennen den alten Eintrag noch kurz. */
+const HOLD_MS = 5 * 60_000
+
+type Removable = Pick<World, 'host_label' | 'port' | 'dns_record_id'>
+
 /**
- * Entfernt den SRV-Eintrag einer gelöschten Welt. Klappt das gerade nicht, wird er vorgemerkt und später
- * nachgeholt — und ihr Port bleibt so lange gesperrt (siehe pendingCleanupPorts). Ein verwaister Eintrag
+ * Merkt den SRV-Eintrag einer Welt zum Entfernen vor und sperrt ihren Port (siehe pendingCleanupPorts).
+ * Läuft ohne Wartepunkt und gehört in dieselbe Transaktion, die die Welt löscht: So ist der Port zu
+ * keinem Zeitpunkt frei, solange der alte Name noch auf ihn zeigen könnte — auch nicht, wenn Cloudflare
+ * gerade nicht antwortet oder die Website mittendrin neu startet.
+ * Gibt den vorgemerkten Namen zurück, oder null, wenn es nichts zu entfernen gibt.
+ */
+export function queueRecordRemoval(world: Removable): string | null {
+  // Ohne Cloudflare-Zugang gibt es nur etwas zu tun, wenn früher ein Eintrag angelegt wurde.
+  if (!dnsEnabled() && !world.dns_record_id) return null
+  const name = recordName(world)
+  db()
+    .prepare('INSERT OR REPLACE INTO dns_cleanup (name, record_id, port, created_at, removed_at) VALUES (?, ?, ?, ?, NULL)')
+    .run(name, world.dns_record_id, world.port, Date.now())
+  return name
+}
+
+/** Entfernt einen vorgemerkten Eintrag bei Cloudflare. Wirft, wenn das gerade nicht klappt — die Vormerkung bleibt. */
+async function removeQueued(name: string): Promise<void> {
+  const row = db().prepare('SELECT record_id FROM dns_cleanup WHERE name = ? AND removed_at IS NULL').get(name) as
+    | { record_id: string | null }
+    | undefined
+  if (!row) return
+  if (row.record_id) await cloudflare('DELETE', `/dns_records/${encodeURIComponent(row.record_id)}`)
+  // Zusätzlich nach dem Namen suchen: Ein Eintrag kann bei Cloudflare angelegt worden sein, ohne dass seine
+  // Kennung noch in der Datenbank ankam.
+  await deleteByName(name)
+  // Der Eintrag ist weg. Den Port noch kurz gesperrt lassen, bis ihn auch kein Resolver mehr kennt.
+  db().prepare('UPDATE dns_cleanup SET removed_at = ? WHERE name = ?').run(Date.now(), name)
+}
+
+/**
+ * Entfernt den SRV-Eintrag einer gelöschten Welt. Klappt das gerade nicht (oder fehlt der Cloudflare-Zugang),
+ * bleibt er vorgemerkt und wird später nachgeholt — ihr Port bleibt so lange gesperrt. Ein verwaister Eintrag
  * würde sonst auf einen Port zeigen, den inzwischen eine fremde Welt hat.
  */
-export async function removeWorldRecord(world: Pick<World, 'host_label' | 'port' | 'dns_record_id'>): Promise<void> {
-  if (!dnsEnabled()) return
-  const name = recordName(world)
+export async function removeWorldRecord(world: Removable): Promise<void> {
+  await finishRecordRemoval(queueRecordRemoval(world))
+}
+
+/** Zweiter Schritt nach queueRecordRemoval: den vorgemerkten Eintrag jetzt bei Cloudflare entfernen. */
+export async function finishRecordRemoval(name: string | null): Promise<void> {
+  if (!name || !dnsEnabled()) return
   try {
-    if (world.dns_record_id) await cloudflare('DELETE', `/dns_records/${encodeURIComponent(world.dns_record_id)}`)
-    // Zusätzlich nach dem Namen suchen: Ein Eintrag kann bei Cloudflare angelegt worden sein, ohne dass seine
-    // Kennung noch in der Datenbank ankam.
-    await deleteByName(name)
-    db().prepare('DELETE FROM dns_cleanup WHERE name = ?').run(name)
+    await removeQueued(name)
   } catch (error) {
-    db()
-      .prepare('INSERT OR REPLACE INTO dns_cleanup (name, record_id, port, created_at) VALUES (?, ?, ?, ?)')
-      .run(name, world.dns_record_id, world.port, Date.now())
     console.error(`[aboutm.ee] DNS-Eintrag ${name} ließ sich nicht entfernen:`, error instanceof Error ? error.message : error)
   }
 }
 
-/** Ports, auf die noch ein nicht entfernter Eintrag einer gelöschten Welt zeigt — sie werden nicht neu vergeben. */
-export function pendingCleanupPorts(): number[] {
-  const rows = db().prepare('SELECT port FROM dns_cleanup WHERE port IS NOT NULL').all() as Array<{ port: number }>
+/** Ports, auf die noch ein Eintrag einer gelöschten Welt zeigt oder gerade eben noch zeigte — sie werden nicht neu vergeben. */
+export function pendingCleanupPorts(now = Date.now()): number[] {
+  const rows = db()
+    .prepare('SELECT port FROM dns_cleanup WHERE port IS NOT NULL AND (removed_at IS NULL OR removed_at > ?)')
+    .all(now - HOLD_MS) as Array<{ port: number }>
   return rows.map((row) => row.port)
 }
 
+/** Wie viele Welten bzw. Einträge ein Durchlauf höchstens bearbeitet — weit unter den Grenzen der Cloudflare-API. */
+const BATCH = 25
+
 /** Holt nach, was beim ersten Versuch nicht geklappt hat: fehlende Einträge anlegen, verwaiste entfernen. */
-export async function dnsMaintenance(): Promise<void> {
+export async function dnsMaintenance(now = Date.now()): Promise<void> {
+  // Erledigte Vormerkungen fallen weg, sobald ihre Sperrfrist um ist.
+  db().prepare('DELETE FROM dns_cleanup WHERE removed_at IS NOT NULL AND removed_at <= ?').run(now - HOLD_MS)
   if (!dnsEnabled()) return
+  reconcileDnsConfig()
 
   const missing = db()
-    .prepare('SELECT * FROM worlds WHERE port IS NOT NULL AND dns_record_id IS NULL ORDER BY created_at LIMIT 5')
-    .all() as World[]
+    .prepare('SELECT * FROM worlds WHERE port IS NOT NULL AND dns_record_id IS NULL ORDER BY created_at LIMIT ?')
+    .all(BATCH) as World[]
   for (const world of missing) {
     try {
       await ensureWorldRecord(world)
     } catch (error) {
       console.error(`[aboutm.ee] DNS-Eintrag für ${world.id}:`, error instanceof Error ? error.message : error)
-      break // vermutlich ein allgemeines Problem (Token, Netz) — nicht für jede Welt wiederholen
+      break // vermutlich ein allgemeines Problem (Token, Netz, Grenze erreicht) — nicht für jede Welt wiederholen
     }
   }
 
-  const orphans = db().prepare('SELECT name, record_id, port FROM dns_cleanup ORDER BY created_at LIMIT 5').all() as Array<{
-    name: string
-    record_id: string | null
-    port: number | null
-  }>
+  const orphans = db()
+    .prepare('SELECT name FROM dns_cleanup WHERE removed_at IS NULL ORDER BY created_at LIMIT ?')
+    .all(BATCH) as Array<{ name: string }>
   for (const orphan of orphans) {
     try {
-      if (orphan.record_id) await cloudflare('DELETE', `/dns_records/${encodeURIComponent(orphan.record_id)}`)
-      await deleteByName(orphan.name)
-      db().prepare('DELETE FROM dns_cleanup WHERE name = ?').run(orphan.name)
+      await removeQueued(orphan.name)
     } catch {
       break // später noch einmal
     }
   }
+}
+
+type DnsSignature = { serverDomain: string; nodeHost: string; zoneId: string }
+
+/**
+ * Passt gespeicherte Einträge an, wenn sich die Domain der Welten, die Adresse des Servers oder die
+ * Cloudflare-Zone geändert hat: Die alten Einträge werden zum Entfernen vorgemerkt und die Welten
+ * bekommen (über dnsMaintenance) neue. Ohne das zeigte die Website Namen an, die es nie geben wird.
+ */
+export function reconcileDnsConfig(): void {
+  if (!dnsEnabled()) return
+  const current: DnsSignature = { serverDomain: config.serverDomain, nodeHost: config.nodeHost, zoneId: config.cloudflare.zoneId }
+  const stored = db().prepare(`SELECT value FROM settings WHERE key = 'dnsSignature'`).get() as { value: string } | undefined
+  let previous: DnsSignature | null = null
+  try {
+    previous = stored ? (JSON.parse(stored.value) as DnsSignature) : null
+  } catch {
+    previous = null
+  }
+  const same =
+    previous?.serverDomain === current.serverDomain && previous.nodeHost === current.nodeHost && previous.zoneId === current.zoneId
+  if (same) return
+
+  db().transaction(() => {
+    if (previous) {
+      const affected = db().prepare('SELECT host_label, dns_record_id FROM worlds WHERE dns_record_id IS NOT NULL').all() as Array<{
+        host_label: string
+        dns_record_id: string
+      }>
+      const renamed = previous.serverDomain !== current.serverDomain
+      const sameZone = previous.zoneId === current.zoneId
+      if (renamed && sameZone) {
+        // Die alten Namen gibt es noch — entfernen. Der Port bleibt bei der Welt und wird nicht gesperrt.
+        const queue = db().prepare(
+          'INSERT OR REPLACE INTO dns_cleanup (name, record_id, port, created_at, removed_at) VALUES (?, ?, NULL, ?, NULL)',
+        )
+        for (const world of affected) {
+          queue.run(`_minecraft._tcp.${world.host_label}.${previous.serverDomain}`, world.dns_record_id, Date.now())
+        }
+      } else if (!sameZone && affected.length > 0) {
+        console.warn(
+          `[aboutm.ee] Die Cloudflare-Zone hat sich geändert. ${affected.length} SRV-Einträge in der bisherigen Zone lassen sich von hier nicht entfernen — bitte dort von Hand löschen.`,
+        )
+      }
+      // Kennungen vergessen: Die Einträge werden neu angelegt bzw. unter ihrem Namen gefunden und berichtigt.
+      db().prepare('UPDATE worlds SET dns_record_id = NULL WHERE dns_record_id IS NOT NULL').run()
+      if (affected.length > 0) {
+        console.log(`[aboutm.ee] Adressen der Welten haben sich geändert — ${affected.length} SRV-Einträge werden neu angelegt.`)
+      }
+    }
+    db()
+      .prepare(`INSERT INTO settings (key, value) VALUES ('dnsSignature', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+      .run(JSON.stringify(current))
+  })()
 }
 
 export type DnsUsage = { used: number; quota: number | null }

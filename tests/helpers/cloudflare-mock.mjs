@@ -3,7 +3,7 @@
 // Aufruf mit, damit ein Test prüfen kann, was das Skript wirklich getan hat.
 import http from 'node:http'
 
-export function startCloudflareMock({ token = 'test-token', zones = ['example.com'], accountToken = false, ssl = 'full' } = {}) {
+export function startCloudflareMock({ token = 'test-token', zones = ['example.com'], accountToken = false, ssl = 'full', sslReadable = true, ips = null } = {}) {
   const state = {
     calls: [],
     zones: zones.map((name, index) => ({ id: `zone${index + 1}`, name, account: { id: 'acc1', name: 'Test' } })),
@@ -36,6 +36,8 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
     }
 
     if ((match = path.match(/^\/zones\/([^/]+)\/settings\/ssl$/))) {
+      // Wie bei Cloudflare: ohne die Berechtigung „Zoneneinstellungen lesen“ gibt es hier keine Auskunft.
+      if (!sslReadable) return fail(403, 'Authentication error')
       if (method === 'GET') return ok({ id: 'ssl', value: state.ssl })
       if (method === 'PATCH') {
         if (!['off', 'flexible', 'full', 'strict'].includes(body?.value)) return fail(400, 'Invalid value')
@@ -165,6 +167,12 @@ export function startCloudflareMock({ token = 'test-token', zones = ['example.co
       const text = Buffer.concat(chunks).toString('utf8')
       const body = text ? JSON.parse(text) : undefined
       state.calls.push({ method: request.method, path: url.pathname, query: url.search, body })
+
+      // Die öffentlichen Listen der Adressbereiche (cloudflare.com/ips-v4 und /ips-v6) brauchen kein Token.
+      if (ips && (url.pathname === '/ips-v4' || url.pathname === '/ips-v6')) {
+        response.writeHead(200, { 'Content-Type': 'text/plain' })
+        return response.end(url.pathname === '/ips-v4' ? ips.v4 : ips.v6)
+      }
 
       let result
       if (request.headers.authorization !== `Bearer ${token}`) result = fail(403, 'Invalid API token')

@@ -8,7 +8,7 @@ import { IMAGE_TYPES, imagesDir, isImageSlot, type ImageExtension } from '../art
 import { requireAdmin } from '../auth'
 import { db } from '../db'
 import { LIMIT_RANGES, setLimit, type Limits } from '../settings'
-import { deleteWorld, listWorlds, requestStop } from '../worlds'
+import { deleteUserWithWorlds, deleteWorld, requestStop } from '../worlds'
 import type { ActionState } from './state'
 
 const FAILED = 'Das hat nicht geklappt. Versuch es gleich noch einmal.'
@@ -72,9 +72,7 @@ export async function adminDeleteUserAction(userId: string): Promise<ActionState
   if (!user) return { error: 'Dieses Konto gibt es nicht mehr.' }
   if (user.is_admin) return { error: 'Admin-Konten lassen sich hier nicht löschen.' }
   try {
-    for (const world of listWorlds(user.id)) await deleteWorld(world)
-    db().prepare('UPDATE feedback SET user_id = NULL WHERE user_id = ?').run(user.id)
-    db().prepare('DELETE FROM users WHERE id = ?').run(user.id)
+    await deleteUserWithWorlds(user.id)
   } catch (error) {
     console.error(`[aboutm.ee] Admin löscht Konto ${user.id}:`, error)
     return { error: FAILED }

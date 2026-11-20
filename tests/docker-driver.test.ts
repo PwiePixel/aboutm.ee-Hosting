@@ -15,6 +15,7 @@ type DockerMock = {
   state: {
     calls: string[]
     containers: Map<string, { running: boolean; spec: { Env: string[]; User: string; HostConfig: Record<string, unknown> } }>
+    networks: Map<string, { Driver: string; Options: Record<string, string> }>
     createDelayMs: number
     players: string
     failStops: boolean
@@ -75,6 +76,9 @@ describe('Docker-Treiber', () => {
     expect(port).toBeGreaterThanOrEqual(25600)
     expect(spec.HostConfig.PortBindings).toEqual({ '25565/tcp': [{ HostPort: String(port) }] })
     expect(spec.Env).toContain('SERVER_PORT=25565')
+    // Die Welten hängen an einem eigenen Netz, in dem sie einander nicht erreichen.
+    expect(spec.HostConfig.NetworkMode).toBe('aboutmee-worlds')
+    expect(mock.state.networks.get('aboutmee-worlds')).toMatchObject({ Driver: 'bridge', Options: { 'com.docker.network.bridge.enable_icc': 'false' } })
 
     await lib.requestStop(world)
     await ticksUntil(world, 'paused')

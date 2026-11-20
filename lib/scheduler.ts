@@ -4,7 +4,7 @@ import { db } from './db'
 import { dnsEnabled, dnsMaintenance } from './dns'
 import { runtime } from './runtime'
 import { limits } from './settings'
-import { tick } from './worlds'
+import { adoptLegacyWorlds, tick } from './worlds'
 
 type Globals = { __amScheduler?: NodeJS.Timeout }
 const globals = globalThis as unknown as Globals
@@ -34,6 +34,12 @@ export function startScheduler(): void {
     )
   }
 
+  try {
+    adoptLegacyWorlds()
+  } catch (error) {
+    console.error('[aboutm.ee] Bestehende Welten übernehmen:', error)
+  }
+
   const run = () => {
     tick({ afterPause: autoBackupAfterPause }).catch((error) => console.error('[aboutm.ee] Taktgeber:', error))
   }
@@ -52,11 +58,11 @@ export function startScheduler(): void {
   )
   cleanup.unref()
 
-  // SRV-Einträge nachziehen, die beim ersten Versuch nicht angelegt oder entfernt werden konnten.
-  const dns = setInterval(
-    () => void dnsMaintenance().catch((error) => console.error('[aboutm.ee] DNS-Pflege:', error)),
-    60 * 1000,
-  )
+  // SRV-Einträge nachziehen, die beim ersten Versuch nicht angelegt oder entfernt werden konnten —
+  // gleich beim Start und danach jede Minute.
+  const maintain = () => void dnsMaintenance().catch((error) => console.error('[aboutm.ee] DNS-Pflege:', error))
+  const dns = setInterval(maintain, 60 * 1000)
   dns.unref()
+  maintain()
   run()
 }

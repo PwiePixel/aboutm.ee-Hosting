@@ -13,7 +13,7 @@
 # Ohne Rückfragen (z. B. für Automatisierung) über Umgebungsvariablen:
 #   AM_SITE_DOMAIN, AM_SERVER_DOMAIN, AM_NODE_HOST, AM_ADMIN_EMAIL, AM_ADMIN_PASSWORD,
 #   AM_CF_API_TOKEN  oder  AM_TURNSTILE_SITE_KEY + AM_TURNSTILE_SECRET_KEY,
-#   AM_PUBLIC_IP, AM_DATA_PATH, AM_PORT_MIN, AM_PORT_MAX, AM_CADDY_TLS, AM_YES=1
+#   AM_PUBLIC_IP, AM_DATA_PATH, AM_PORT_MIN, AM_PORT_MAX, AM_CADDY_TLS, AM_ORIGIN_ALLOW, AM_YES=1
 
 set -Eeuo pipefail
 
@@ -105,7 +105,7 @@ env_value() { # env_value <Datei> <Schlüssel>
 }
 
 # Schlüssel, die dieses Skript in der .env selbst verwaltet. Alles andere bleibt unangetastet erhalten.
-MANAGED_KEYS='SITE_DOMAIN SITE_URL SERVER_DOMAIN NODE_HOST MC_PORT_MIN MC_PORT_MAX CLOUDFLARE_API_TOKEN CLOUDFLARE_ZONE_ID TURNSTILE_SITE_KEY TURNSTILE_SECRET_KEY CADDY_TLS DATA_PATH TOTAL_SLOTS AUTO_PAUSE_MINUTES MC_CPUS SUPPORT_EMAIL COMPOSE_PROFILES TUNNEL_TOKEN CLIENT_IP_HEADER'
+MANAGED_KEYS='SITE_DOMAIN SITE_URL SERVER_DOMAIN NODE_HOST MC_PORT_MIN MC_PORT_MAX CLOUDFLARE_API_TOKEN CLOUDFLARE_ZONE_ID TURNSTILE_SITE_KEY TURNSTILE_SECRET_KEY CADDY_TLS ORIGIN_ALLOW CLOUDFLARE_IPS DATA_PATH TOTAL_SLOTS AUTO_PAUSE_MINUTES MC_CPUS SUPPORT_EMAIL COMPOSE_PROFILES TUNNEL_TOKEN CLIENT_IP_HEADER'
 
 # Gibt alle Einstellungen einer .env aus, die dieses Skript nicht selbst verwaltet (z. B. Statistik-Schlüssel).
 env_extras() { # env_extras <Datei>
@@ -123,6 +123,28 @@ env_extras() { # env_extras <Datei>
 CF_HEADERS=''
 ZONE_STATUS=''
 CLOUDFLARE_ZONE_ID=''
+# Ob die Website nach der Einrichtung über den Cloudflare-Proxy läuft (true/false) oder das offen ist (leer).
+SITE_PROXIED=''
+DNS_PROXIED=''
+
+# Adressbereiche, aus denen Cloudflare diesen Server anspricht — Stand 20.11.2026. install.sh holt beim
+# Lauf die aktuelle Liste und nimmt diese nur, wenn das nicht klappt.
+CF_RANGES_BUILTIN='173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32'
+
+# Gibt die aktuellen Adressbereiche von Cloudflare aus, durch Leerzeichen getrennt.
+cloudflare_ranges() {
+  local v4 v6 list
+  v4="$(curl -fsS --max-time 10 "${AM_CF_IPS_BASE:-https://www.cloudflare.com}/ips-v4" 2>/dev/null || true)"
+  v6="$(curl -fsS --max-time 10 "${AM_CF_IPS_BASE:-https://www.cloudflare.com}/ips-v6" 2>/dev/null || true)"
+  list="$(printf '%s\n%s\n' "$v4" "$v6" | tr -d '\r' | grep -E '^[0-9a-fA-F:.]+/[0-9]{1,3}$' | tr '\n' ' ' || true)"
+  list="${list% }"
+  # Nur eine plausible Liste übernehmen — beide Arten von Adressen und nichts Abgeschnittenes.
+  if [[ -n "$v4" && -n "$v6" && "$(wc -w <<<"$list")" -ge 10 && "$list" == *.*/* && "$list" == *:*/* ]]; then
+    printf '%s' "$list"
+  else
+    printf '%s' "$CF_RANGES_BUILTIN"
+  fi
+}
 
 # Ruft die Cloudflare-API auf und gibt die Antwort aus. Bricht mit der Meldung von Cloudflare ab,
 # wenn der Aufruf scheitert. Das Token steht nur in einer Datei, nie in der Prozessliste.
@@ -167,9 +189,22 @@ cf_find_zone() { # cf_find_zone <Adresse>  → setzt ZONE_ID, ZONE_NAME, ACCOUNT
   return 0
 }
 
+# Prüft ohne Abbruch, ob das Token die Domain zu einer Adresse lesen darf.
+cf_zone_visible() { # cf_zone_visible <Adresse>
+  local candidate="$1" response
+  while [[ "$candidate" == *.* ]]; do
+    response="$(cf_try GET "/zones?name=$candidate")" || return 1
+    if [[ "$(jq -r '.result | length' <<<"$response")" -gt 0 ]]; then return 0; fi
+    candidate="${candidate#*.}"
+  done
+  return 1
+}
+
 # Legt einen DNS-Eintrag an oder aktualisiert ihn. Fragt nach, bevor ein fremder Eintrag ersetzt wird.
+# Setzt DNS_PROXIED darauf, ob der Eintrag danach über den Cloudflare-Proxy läuft.
 cf_dns_upsert() { # cf_dns_upsert <Typ> <Name> <Ziel> <proxied true|false> <Zone>
-  local type="$1" name="$2" content="$3" proxied="$4" zone="$5" existing id current current_type body
+  local type="$1" name="$2" content="$3" proxied="$4" zone="$5" existing id current current_type current_proxied body
+  DNS_PROXIED="$proxied"
   body="$(jq -n --arg type "$type" --arg name "$name" --arg content "$content" --argjson proxied "$proxied" \
     '{type: $type, name: $name, content: $content, proxied: $proxied, ttl: 1, comment: "aboutm.ee Hosting"}')"
   # Ein Name kann nur entweder A/AAAA- oder CNAME-Einträge haben — deshalb alle drei Arten prüfen.
@@ -186,9 +221,25 @@ cf_dns_upsert() { # cf_dns_upsert <Typ> <Name> <Ziel> <proxied true|false> <Zone
   current="$(jq -r '.[0].content' <<<"$existing")"
   current_type="$(jq -r '.[0].type' <<<"$existing")"
   id="$(jq -r '.[0].id' <<<"$existing")"
-  if [[ "$(jq 'length' <<<"$existing")" -eq 1 && "$current_type" == "$type" && "$current" == "$content" &&
-    "$(jq -r '.[0].proxied' <<<"$existing")" == "$proxied" ]]; then
-    ok "DNS: $name zeigt schon auf $content"
+  current_proxied="$(jq -r '.[0].proxied // false' <<<"$existing")"
+  if [[ "$(jq 'length' <<<"$existing")" -eq 1 && "$current_type" == "$type" && "$current" == "$content" ]]; then
+    if [[ "$current_proxied" == "$proxied" ]]; then
+      ok "DNS: $name zeigt schon auf $content"
+      return
+    fi
+    if [[ "$proxied" == true ]]; then
+      # Der Eintrag stimmt, nur der Cloudflare-Proxy ist bewusst aus — das bleibt so.
+      DNS_PROXIED=false
+      ok "DNS: $name zeigt schon auf $content"
+      note "Der Cloudflare-Proxy ist für $name ausgeschaltet (graue Wolke) und bleibt es. Für den Schutz durch Cloudflare im Dashboard einschalten."
+      return
+    fi
+    # Umgekehrt: Der Proxy ist an, darf es für Minecraft aber nicht sein — er leitet nur Webseiten durch.
+    warn "Für $name ist der Cloudflare-Proxy eingeschaltet (orange Wolke). Minecraft-Verbindungen kommen so nicht an."
+    confirm "Proxy für $name ausschalten?" ||
+      die "DNS für $name nicht geändert. Schalte den Proxy für diesen Eintrag selbst aus oder gib mit AM_NODE_HOST=<Adresse> eine andere Adresse an."
+    cf PATCH "/zones/$zone/dns_records/$id" '{"proxied": false}' >/dev/null
+    ok "DNS: Proxy für $name ausgeschaltet"
     return
   fi
 
@@ -217,7 +268,7 @@ cloudflare_setup() {
     ok "API-Token ist gültig"
   fi
 
-  # ── Website: über Cloudflare (orange Wolke), damit dessen Schutz davor liegt ──
+  # Erst beide Domains suchen und alles prüfen — geändert wird erst, wenn die Angaben zusammenpassen.
   cf_find_zone "$SITE_DOMAIN"
   [[ -n "$ZONE_ID" ]] || die "Zu $SITE_DOMAIN gibt es in diesem Cloudflare-Konto keine Domain. Die Domain muss bei Cloudflare liegen und das Token muss sie lesen dürfen (Zone · Zone · Lesen)."
   ok "Domain gefunden: $ZONE_NAME"
@@ -228,24 +279,32 @@ cloudflare_setup() {
     warn "$SITE_DOMAIN liegt zwei Ebenen unter $ZONE_NAME. Dafür stellt Cloudflare kein kostenloses Zertifikat aus —"
     warn "nimm lieber eine Adresse direkt unter der Domain (z. B. hosting.$ZONE_NAME)."
   fi
+
+  cf_find_zone "$SERVER_DOMAIN"
+  [[ -n "$ZONE_ID" ]] || die "Zu $SERVER_DOMAIN gibt es in diesem Cloudflare-Konto keine Domain."
+  CLOUDFLARE_ZONE_ID="$ZONE_ID"
+  [[ "$NODE_HOST" == "$ZONE_NAME" || "$NODE_HOST" == *".$ZONE_NAME" ]] ||
+    die "$NODE_HOST gehört nicht zur Domain $ZONE_NAME. Die Adresse des Servers muss in derselben Domain liegen wie die Welten — mit AM_NODE_HOST=<Adresse> angeben oder NODE_HOST in .env ändern."
+
+  # ── Website: über Cloudflare (orange Wolke), damit dessen Schutz davor liegt ──
   cf_dns_upsert A "$SITE_DOMAIN" "$PUBLIC_IP" true "$site_zone"
+  SITE_PROXIED="$DNS_PROXIED"
 
   # Dieser Server verträgt die Cloudflare-Modi 'Flexible' und 'Full' ohne weiteres Zutun. Nur
   # 'Full (strict)' verlangt ein öffentlich gültiges Zertifikat — dann holt Caddy eines von Let's Encrypt.
   # Geändert wird der Modus hier nicht: Er gilt für die ganze Domain und damit auch für andere Seiten darauf.
-  if response="$(cf_try GET "/zones/$site_zone/settings/ssl")" && [[ "$(jq -r '.result.value // empty' <<<"$response")" == strict ]]; then
-    if [[ "$CADDY_TLS" == internal ]]; then
+  if response="$(cf_try GET "/zones/$site_zone/settings/ssl")"; then
+    if [[ "$(jq -r '.result.value // empty' <<<"$response")" == strict && "$CADDY_TLS" == internal ]]; then
       CADDY_TLS="$ADMIN_EMAIL"
       note "Cloudflare steht auf 'Full (strict)' — Caddy holt deshalb ein Zertifikat von Let's Encrypt."
     fi
+  elif [[ "$CADDY_TLS" == internal ]]; then
+    note "Der SSL-Modus der Domain ließ sich nicht lesen (dem Token fehlt Zone · Zoneneinstellungen · Lesen)."
+    note "Mit 'Flexible' oder 'Full' läuft alles. Steht er auf 'Full (strict)', in .env CADDY_TLS=<deine E-Mail> setzen."
   fi
 
   # ── Minecraft: Adresse dieses Servers, ohne Cloudflare-Proxy (der leitet nur Webseiten durch) ──
-  cf_find_zone "$SERVER_DOMAIN"
-  [[ -n "$ZONE_ID" ]] || die "Zu $SERVER_DOMAIN gibt es in diesem Cloudflare-Konto keine Domain."
-  CLOUDFLARE_ZONE_ID="$ZONE_ID"
-  [[ "$NODE_HOST" == *".$ZONE_NAME" ]] || die "$NODE_HOST gehört nicht zur Domain $ZONE_NAME. Die Adresse des Servers muss in derselben Domain liegen wie die Welten."
-  cf_dns_upsert A "$NODE_HOST" "$PUBLIC_IP" false "$ZONE_ID"
+  cf_dns_upsert A "$NODE_HOST" "$PUBLIC_IP" false "$CLOUDFLARE_ZONE_ID"
   note "Welten bekommen beim Anlegen automatisch einen SRV-Eintrag unter $SERVER_DOMAIN, der auf $NODE_HOST zeigt."
 
   # ── Turnstile ──
@@ -362,11 +421,20 @@ main() {
   is_domain "$SERVER_DOMAIN" || die "'$SERVER_DOMAIN' ist keine gültige Domain."
 
   # Adresse dieses Servers für Minecraft-Verbindungen. Auf sie zeigen die SRV-Einträge der Welten.
-  NODE_HOST="${AM_NODE_HOST:-$(env_value "$env_file" NODE_HOST)}"
+  local stored_server stored_node
+  stored_server="$(env_value "$env_file" SERVER_DOMAIN)"
+  stored_node="$(env_value "$env_file" NODE_HOST)"
+  # Wurde die Domain der Welten geändert, zieht die Standard-Adresse des Servers mit um.
+  if [[ -n "$stored_server" && "$stored_server" != "$SERVER_DOMAIN" && "$stored_node" == "node.$stored_server" ]]; then stored_node=''; fi
+  NODE_HOST="${AM_NODE_HOST:-$stored_node}"
   NODE_HOST="${NODE_HOST:-node.$SERVER_DOMAIN}"
   NODE_HOST="${NODE_HOST,,}"
   is_domain "$NODE_HOST" || die "'$NODE_HOST' ist kein gültiger Hostname."
   [[ "$NODE_HOST" != "$SITE_DOMAIN" ]] || die "Die Adresse des Servers ($NODE_HOST) darf nicht dieselbe sein wie die der Website — die Website läuft über Cloudflare, Minecraft nicht."
+  if [[ -n "$stored_server" && "$stored_server" != "$SERVER_DOMAIN" ]]; then
+    warn "Die Domain der Welten ändert sich von $stored_server auf $SERVER_DOMAIN. Bestehende Welten bekommen neue Adressen;"
+    warn "die Website legt ihre SRV-Einträge neu an und entfernt die alten."
+  fi
 
   PORT_MIN="${AM_PORT_MIN:-$(env_value "$env_file" MC_PORT_MIN)}"
   PORT_MAX="${AM_PORT_MAX:-$(env_value "$env_file" MC_PORT_MAX)}"
@@ -394,7 +462,11 @@ main() {
 
   # Das API-Token bleibt auf dem Server gespeichert: Die Website legt damit für jede neue Welt einen
   # SRV-Eintrag an. Bei einem erneuten Lauf wird das gespeicherte Token weiterverwendet.
-  local cf_token="${AM_CF_API_TOKEN:-$(env_value "$env_file" CLOUDFLARE_API_TOKEN)}"
+  local cf_token="${AM_CF_API_TOKEN:-}" token_stored=0
+  if [[ -z "$cf_token" ]]; then
+    cf_token="$(env_value "$env_file" CLOUDFLARE_API_TOKEN)"
+    [[ -z "$cf_token" ]] || token_stored=1
+  fi
   if [[ -z "$cf_token" && "${AM_YES:-}" != 1 ]]; then
     printf '\n  Mit einem Cloudflare-API-Token richtet das Skript DNS und Sicherheitsprüfung selbst ein, und die Website\n'
     printf '  legt später für jede neue Welt automatisch einen SRV-Eintrag an. Das Token wird dafür auf diesem Server\n'
@@ -402,6 +474,7 @@ main() {
     printf '  Token anlegen: Cloudflare-Dashboard → Mein Profil → API-Token → Token erstellen → Benutzerdefiniert, mit:\n'
     printf '    Zone   · DNS               · Bearbeiten   (für deine Domain)\n'
     printf '    Zone   · Zone              · Lesen        (für deine Domain)\n'
+    printf '    Zone   · Zoneneinstellungen · Lesen       (für deine Domain; optional — erkennt den SSL-Modus)\n'
     printf '    Konto  · Turnstile         · Bearbeiten\n'
     ask_secret cf_token "API-Token einfügen (Eingabe bleibt unsichtbar; leer lassen, um alles von Hand einzutragen)"
   fi
@@ -418,7 +491,24 @@ main() {
   if [[ -n "$cf_token" ]]; then
     CF_HEADERS="$WORK_DIR/cf-headers"
     (umask 077 && printf 'Authorization: Bearer %s\n' "$cf_token" >"$CF_HEADERS")
-    cloudflare_setup
+    local stored_zone
+    stored_zone="$(env_value "$env_file" CLOUDFLARE_ZONE_ID)"
+    # Erneuter Lauf mit dem gespeicherten Token: Es kann bewusst knapper gehalten sein (nur DNS bearbeiten) oder
+    # inzwischen ersetzt worden sein. Hat sich an den Adressen nichts geändert, ist dann nichts einzurichten —
+    # die Aktualisierung soll daran nicht scheitern.
+    if ((token_stored)) && [[ -n "$stored_zone" && -n "$TURNSTILE_SITE_KEY" && -n "$TURNSTILE_SECRET_KEY" &&
+      "$(env_value "$env_file" SITE_DOMAIN)" == "$SITE_DOMAIN" && "$stored_server" == "$SERVER_DOMAIN" &&
+      "$(env_value "$env_file" NODE_HOST)" == "$NODE_HOST" ]] && ! { cf_zone_visible "$SITE_DOMAIN" && cf_zone_visible "$SERVER_DOMAIN"; }; then
+      step "Cloudflare"
+      warn "Das gespeicherte API-Token darf die Domain nicht (mehr) lesen — die Cloudflare-Einrichtung wird übersprungen."
+      note "DNS-Einträge, Turnstile und die übrigen Einstellungen bleiben, wie sie sind."
+      note "Um sie neu einzurichten: AM_CF_API_TOKEN=<Token mit allen Rechten> sudo -E ./install.sh"
+      CLOUDFLARE_ZONE_ID="$stored_zone"
+      # Ob die Website über den Proxy läuft, lässt sich so nicht prüfen — die bisherige Einstellung bleibt.
+      SITE_PROXIED=''
+    else
+      cloudflare_setup
+    fi
   else
     step "Cloudflare von Hand"
     if [[ -z "$TURNSTILE_SITE_KEY" || -z "$TURNSTILE_SECRET_KEY" ]]; then
@@ -449,6 +539,18 @@ main() {
   fi
   # Ohne Zone kann die Website keine Einträge anlegen — dann das Token gar nicht erst ablegen.
   [[ -n "$CLOUDFLARE_ZONE_ID" ]] || cf_token=''
+
+  # Läuft die Website über den Cloudflare-Proxy, nimmt Caddy nur Anfragen von Cloudflare an. Sonst ließe
+  # sich der Schutz von Cloudflare umgehen, indem man den Server direkt anspricht — seine Adresse ist über
+  # die Minecraft-Adresse ja bekannt.
+  local cf_ranges origin_allow
+  cf_ranges="$(cloudflare_ranges)"
+  case "$SITE_PROXIED" in
+  true) origin_allow="$cf_ranges" ;;
+  false) origin_allow='' ;;
+  *) origin_allow="$(env_value "$env_file" ORIGIN_ALLOW)" ;;
+  esac
+  [[ -z "${AM_ORIGIN_ALLOW+x}" ]] || origin_allow="$AM_ORIGIN_ALLOW"
   (
     umask 077
     cat >"$env_file" <<EOF
@@ -471,6 +573,10 @@ TURNSTILE_SECRET_KEY=$TURNSTILE_SECRET_KEY
 
 # Zertifikat des Servers: internal (hinter Cloudflare) oder eine E-Mail-Adresse für Let's Encrypt
 CADDY_TLS=$CADDY_TLS
+# Wer die Website auf diesem Server direkt ansprechen darf (leer = jeder) und wem die Besucheradresse
+# geglaubt wird: die Adressbereiche von Cloudflare. Wird bei jedem Lauf von install.sh aufgefrischt.
+ORIGIN_ALLOW="$origin_allow"
+CLOUDFLARE_IPS="$cf_ranges"
 
 DATA_PATH=$DATA_PATH
 TOTAL_SLOTS=${total_slots:-20}
@@ -501,6 +607,8 @@ EOF
   step "Website bauen und starten (das dauert beim ersten Mal ein paar Minuten)"
   # Dienste aus früheren Ständen (Tunnel, Minecraft-Router) abräumen — sie werden nicht mehr gebraucht.
   docker rm --force "$(basename "$INSTALL_DIR" | tr '[:upper:]' '[:lower:]')-tunnel-1" "$(basename "$INSTALL_DIR" | tr '[:upper:]' '[:lower:]')-router-1" >/dev/null 2>&1 || true
+  # Das frühere gemeinsame Netz der Welten: verschwindet, sobald keine alte Welt mehr daran hängt.
+  docker network rm aboutmee-mc >/dev/null 2>&1 || true
   # Erst nur die Website starten — noch ohne Caddy. So ist die Seite von außen nicht erreichbar, bis das
   # Admin-Konto steht, und niemand kann sich vorher unter deiner Adresse registrieren.
   docker compose up -d --build web
@@ -535,7 +643,32 @@ EOF
   # ── 10. Öffentlich schalten ──
   step "Website öffentlich schalten"
   docker compose up -d --remove-orphans
-  ok "Caddy gestartet — https://$SITE_DOMAIN ist jetzt über Cloudflare erreichbar"
+  ok "Caddy gestartet"
+  if [[ -n "$origin_allow" ]]; then
+    note "Die Website nimmt nur Anfragen an, die über Cloudflare kommen — ein direkter Aufruf über die IP-Adresse bleibt ohne Antwort."
+  fi
+  # Von außen nachsehen, ob die Seite wirklich ankommt — und bei den üblichen Stolpersteinen sagen, woran es liegt.
+  local code='' tries=0
+  while ((tries < 6)); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$SITE_DOMAIN/login" 2>/dev/null || true)"
+    [[ "$code" != 200 ]] || break
+    tries=$((tries + 1))
+    sleep 5
+  done
+  case "$code" in
+  200) ok "https://$SITE_DOMAIN ist erreichbar" ;;
+  526)
+    warn "Cloudflare lehnt das Zertifikat dieses Servers ab (Fehler 526): Die Domain steht auf 'Full (strict)'."
+    warn "Entweder im Cloudflare-Dashboard unter SSL/TLS auf 'Full' stellen, oder in .env CADDY_TLS=$ADMIN_EMAIL setzen und: docker compose up -d"
+    ;;
+  521 | 522 | 523)
+    warn "Cloudflare erreicht diesen Server nicht (Fehler $code). Sind die Ports 80 und 443 in der Firewall deines Anbieters offen?"
+    ;;
+  *)
+    note "https://$SITE_DOMAIN antwortet von hier aus noch nicht (Antwort: ${code:-keine}). Neue DNS-Einträge brauchen oft ein paar Minuten —"
+    note "probier es gleich im Browser. Bleibt es dabei: docker compose logs caddy"
+    ;;
+  esac
 
   step "Minecraft-Images vorab laden (damit der erste Start einer Welt schnell geht)"
   local image

@@ -13,7 +13,7 @@ services:
       # Derselbe Pfad innen und außen — die Minecraft-Container hängen ihn vom Host ein.
       DATA_DIR: ${DATA_PATH:-/srv/aboutmee/data}
       HOST_DATA_DIR: ${DATA_PATH:-/srv/aboutmee/data}
-      MC_NETWORK: aboutmee-mc
+      MC_NETWORK: aboutmee-worlds
       # Die Adresse des Besuchers setzt Caddy (siehe Caddyfile) — nur dieser Kopfzeile wird geglaubt.
       CLIENT_IP_HEADER: x-real-ip
     volumes:
@@ -34,6 +34,10 @@ services:
       SITE_DOMAIN: ${SITE_DOMAIN:?SITE_DOMAIN in .env eintragen, z. B. aboutm.ee}
       # internal = eigenes Zertifikat (hinter Cloudflare), E-Mail-Adresse = Let's Encrypt — siehe Caddyfile
       CADDY_TLS: ${CADDY_TLS:-internal}
+      # Wer den Server ansprechen darf und wem die Besucheradresse geglaubt wird — siehe Caddyfile.
+      # install.sh trägt hier die Adressbereiche von Cloudflare ein.
+      ORIGIN_ALLOW: ${ORIGIN_ALLOW:-0.0.0.0/0 ::/0}
+      CLOUDFLARE_IPS: ${CLOUDFLARE_IPS:-173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32}
     ports:
       - "80:80"
       - "443:443"

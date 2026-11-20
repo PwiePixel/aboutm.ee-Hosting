@@ -36,7 +36,7 @@ function runCloudflareSetup(
     : "\${TURNSTILE_SITE_KEY:=}" "\${TURNSTILE_SECRET_KEY:=}" "\${CADDY_TLS:=internal}" "\${ADMIN_EMAIL:=chef@example.com}"
     cloudflare_setup >&2
     jq -n --arg zone "$CLOUDFLARE_ZONE_ID" --arg site "$TURNSTILE_SITE_KEY" --arg secret "$TURNSTILE_SECRET_KEY" --arg tls "$CADDY_TLS" \\
-      '{zone: $zone, site: $site, secret: $secret, tls: $tls}'
+      --arg proxied "$SITE_PROXIED" '{zone: $zone, site: $site, secret: $secret, tls: $tls, proxied: $proxied}'
   `
   return new Promise((resolve) => {
     // detached löst das Terminal ab — wie beim Start über cron oder eine Pipe ohne Rückfragemöglichkeit.
@@ -152,10 +152,102 @@ describe('install.sh — Cloudflare einrichten', () => {
     expect(site[0]).toMatchObject({ type: 'A', content: '203.0.113.7', proxied: true })
   })
 
-  it('verlangt, dass die Server-Adresse in der Domain der Welten liegt', async () => {
+  it('verlangt, dass die Server-Adresse in der Domain der Welten liegt — und ändert vorher nichts', async () => {
     const run = await runCloudflareSetup(mock, { ...BASE, NODE_HOST: 'node.andere-domain.de' })
     expect(run.code).not.toBe(0)
     expect(run.stderr).toContain('node.andere-domain.de')
+    expect(run.stderr).toContain('AM_NODE_HOST')
+    expect(mock.state.dns).toHaveLength(0)
+  })
+
+  it('nimmt als Server-Adresse auch die Domain selbst', async () => {
+    const run = await runCloudflareSetup(mock, { ...BASE, NODE_HOST: 'example.com' })
+    expect(run.code, run.stderr).toBe(0)
+    expect(records(mock)).toContainEqual({ type: 'A', name: 'example.com', content: '203.0.113.7', proxied: false })
+  })
+
+  it('lässt einen bewusst ausgeschalteten Proxy der Website in Ruhe', async () => {
+    await fetch(`${mock.url}/zones/zone1/dns_records`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'A', name: 'hosting.example.com', content: '203.0.113.7', proxied: false }),
+    })
+    const run = await runCloudflareSetup(mock, BASE) // ohne AM_YES: es darf gar keine Rückfrage geben
+    expect(run.code, run.stderr).toBe(0)
+    expect(run.result!.proxied).toBe('false')
+    expect(records(mock)).toContainEqual({ type: 'A', name: 'hosting.example.com', content: '203.0.113.7', proxied: false })
+    expect(mock.state.calls.some((call) => call.method === 'DELETE')).toBe(false)
+  })
+
+  it('schaltet den Proxy für die Server-Adresse nur nach Zustimmung aus', async () => {
+    await fetch(`${mock.url}/zones/zone1/dns_records`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'A', name: 'node.example.com', content: '203.0.113.7', proxied: true }),
+    })
+    const refused = await runCloudflareSetup(mock, BASE)
+    expect(refused.code).not.toBe(0)
+    expect(refused.stderr).toContain('Proxy')
+    expect(mock.state.dns.find((r) => r.name === 'node.example.com')!.proxied).toBe(true)
+
+    const agreed = await runCloudflareSetup(mock, { ...BASE, AM_YES: '1' })
+    expect(agreed.code, agreed.stderr).toBe(0)
+    expect(agreed.result!.proxied).toBe('true') // die Website läuft über den Proxy
+    expect(mock.state.dns.filter((r) => r.name === 'node.example.com')).toMatchObject([{ content: '203.0.113.7', proxied: false }])
+  })
+
+  it('weist darauf hin, wenn das Token den SSL-Modus nicht lesen darf', async () => {
+    await mock.close()
+    mock = await startCloudflareMock({ zones: ['example.com'], ssl: 'strict', sslReadable: false })
+    const run = await runCloudflareSetup(mock, { ...BASE, CADDY_TLS: 'internal' })
+    expect(run.code, run.stderr).toBe(0)
+    expect(run.result!.tls).toBe('internal')
+    expect(run.stderr).toContain('Full (strict)')
+    expect(run.stderr).toContain('CADDY_TLS')
+  })
+
+  it('erkennt ohne Abbruch, ob ein Token die Domain lesen darf', async () => {
+    const check = (token: string, domain: string) =>
+      new Promise<number>((resolve) => {
+        const child = spawn(
+          'bash',
+          ['-c', `AM_SOURCE_ONLY=1 source ./install.sh; WORK_DIR="$(mktemp -d)"; CF_HEADERS="$WORK_DIR/h"; printf 'Authorization: Bearer %s\\n' "$T" > "$CF_HEADERS"; cf_zone_visible "$D"`],
+          { cwd: ROOT, env: { ...process.env, AM_CF_API_BASE: mock.url, T: token, D: domain }, stdio: 'ignore' },
+        )
+        child.on('close', (code) => resolve(code ?? 1))
+      })
+    expect(await check('test-token', 'hosting.example.com')).toBe(0)
+    expect(await check('test-token', 'hosting.andere-domain.de')).toBe(1)
+    expect(await check('falsches-token', 'hosting.example.com')).toBe(1)
+  })
+
+  it('holt die aktuellen Adressbereiche von Cloudflare und fällt sonst auf die mitgelieferten zurück', async () => {
+    const ranges = (base: string) =>
+      new Promise<string>((resolve) => {
+        let out = ''
+        const child = spawn('bash', ['-c', 'AM_SOURCE_ONLY=1 source ./install.sh; cloudflare_ranges'], {
+          cwd: ROOT,
+          env: { ...process.env, AM_CF_IPS_BASE: base },
+          stdio: ['ignore', 'pipe', 'ignore'],
+        })
+        child.stdout.on('data', (chunk: Buffer) => (out += chunk.toString()))
+        child.on('close', () => resolve(out))
+      })
+    // Der Nachbau liefert hier keine Listen → mitgelieferter Stand.
+    const builtin = await ranges(mock.url)
+    expect(builtin.split(' ')).toHaveLength(22)
+    expect(builtin).toContain('173.245.48.0/20')
+    expect(builtin).toContain('2606:4700::/32')
+
+    await mock.close()
+    const v4 = Array.from({ length: 9 }, (_, i) => `198.51.${i}.0/24`).join('\n') + '\n'
+    mock = await startCloudflareMock({ zones: ['example.com'], ips: { v4, v6: '2001:db8::/32\n2001:db9::/32\n' } })
+    expect((await ranges(mock.url)).split(' ')).toEqual([...Array.from({ length: 9 }, (_, i) => `198.51.${i}.0/24`), '2001:db8::/32', '2001:db9::/32'])
+
+    // Eine kaputte Antwort (z. B. eine Fehlerseite) wird nicht übernommen.
+    await mock.close()
+    mock = await startCloudflareMock({ zones: ['example.com'], ips: { v4: '<html>Fehler</html>', v6: '2001:db8::/32\n' } })
+    expect(await ranges(mock.url)).toBe(builtin)
   })
 
   it('bricht mit der Meldung von Cloudflare ab, wenn das Token nicht stimmt oder die Domain fehlt', async () => {

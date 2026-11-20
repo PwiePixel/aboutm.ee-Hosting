@@ -16,6 +16,8 @@ export function startDockerMock(socketPath, { createDelayMs = 0, stopDelayMs = 5
     calls: [],
     /** name -> { running, spec } */
     containers: new Map(),
+    /** name -> Angaben beim Anlegen */
+    networks: new Map(),
     createDelayMs,
     players,
     /** Auf true setzen, damit Stopp-Anfragen mit einem Fehler beantwortet werden. */
@@ -37,7 +39,15 @@ export function startDockerMock(socketPath, { createDelayMs = 0, stopDelayMs = 5
       }
       let match
 
-      if (request.method === 'GET' && path.startsWith('/networks/')) return send(200, { Name: 'test' })
+      if (request.method === 'GET' && path.startsWith('/networks/')) {
+        const network = state.networks.get(decodeURIComponent(path.slice('/networks/'.length)))
+        return network ? send(200, network) : send(404, { message: 'network not found' })
+      }
+      if (request.method === 'POST' && path === '/networks/create') {
+        if (state.networks.has(body.Name)) return send(409, { message: 'network already exists' })
+        state.networks.set(body.Name, body)
+        return send(201, { Id: body.Name })
+      }
 
       if (request.method === 'POST' && path === '/containers/create') {
         const name = url.searchParams.get('name')

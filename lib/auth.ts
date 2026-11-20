@@ -85,5 +85,15 @@ export async function clientIp(): Promise<string | null> {
   if (trusted) return trusted
   // Ohne vorgeschalteten Dienst (lokale Entwicklung) hilft die Angabe des Entwicklungsservers.
   if (process.env.NODE_ENV !== 'production') return list.get('x-forwarded-for')?.split(',')[0]?.trim() || null
+  // Im Betrieb setzt Caddy diese Kopfzeile bei jeder Anfrage. Fehlt sie, erreicht jemand die Website an
+  // Caddy vorbei (etwa über einen übrig gebliebenen Tunnel) — dann teilen sich alle Besucher dieselben Limits.
+  const globals = globalThis as { __amMissingIpWarned?: boolean }
+  if (!globals.__amMissingIpWarned) {
+    globals.__amMissingIpWarned = true
+    console.warn(
+      `[aboutm.ee] Eine Anfrage kam ohne die Kopfzeile „${config.clientIpHeader}“ an — die Website wird an Caddy vorbei erreicht. ` +
+        'Alte Dienste entfernen: docker compose up -d --remove-orphans',
+    )
+  }
   return null
 }

@@ -58,7 +58,7 @@ export const config = {
     socket: process.env.DOCKER_SOCKET ?? '/var/run/docker.sock',
     /** Pfad des Datenordners auf dem Host — weicht nur ab, wenn die Website selbst im Container läuft. */
     hostDataDir: path.resolve(/*turbopackIgnore: true*/ process.env.HOST_DATA_DIR ?? process.env.DATA_DIR ?? './data'),
-    network: process.env.MC_NETWORK ?? 'aboutmee-mc',
+    network: process.env.MC_NETWORK ?? 'aboutmee-worlds',
     imageJava21: process.env.MC_IMAGE_JAVA21 ?? 'itzg/minecraft-server:java21',
     imageJava25: process.env.MC_IMAGE_JAVA25 ?? 'itzg/minecraft-server:java25',
     /** Obergrenze an CPU-Kernen je Welt. */

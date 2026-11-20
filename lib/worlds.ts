@@ -3,7 +3,7 @@ import { config } from './config'
 import { db } from './db'
 import { directorySize } from './files'
 import { newWorldId, randomId } from './ids'
-import { pendingCleanupPorts, removeWorldRecord } from './dns'
+import { finishRecordRemoval, pendingCleanupPorts, queueRecordRemoval } from './dns'
 import { isLocked } from './locks'
 import { backupsDir, worldDir } from './paths'
 import { runtime } from './runtime'
@@ -43,7 +43,42 @@ function freePort(): number {
   throw new WorldError('Im Moment sind alle Server-Adressen vergeben. Bitte versuch es später noch einmal.')
 }
 
-/** Welten aus älteren Ständen haben noch keinen Port — er wird beim ersten Start vergeben. */
+/**
+ * Übernimmt Welten aus Ständen vor den eigenen Ports — einmal beim Start der Website.
+ * Läuft so eine Welt noch, hat ihr Container keinen veröffentlichten Port und ist von außen nicht
+ * erreichbar: Sie wird neu gestartet. Alle anderen bekommen gleich ihren Port, damit ihr SRV-Eintrag
+ * schon steht, bevor jemand sie startet.
+ */
+export function adoptLegacyWorlds(): void {
+  const legacy = db().prepare('SELECT * FROM worlds WHERE port IS NULL ORDER BY created_at').all() as World[]
+  if (legacy.length === 0) return
+  let restarted = 0
+  for (const world of legacy) {
+    if (world.status === 'starting' || world.status === 'online') {
+      // Der Taktgeber stoppt den alten Container und startet die Welt danach mit ihrem Port neu.
+      setStatus(world, 'stopping', { restart_pending: 1, pause_reason: null })
+      restarted += 1
+    }
+  }
+  const assigned = db().transaction(() => {
+    let count = 0
+    for (const world of legacy) {
+      let port: number
+      try {
+        port = freePort()
+      } catch {
+        console.error('[aboutm.ee] Der Portbereich reicht nicht für alle bestehenden Welten — MC_PORT_MAX erhöhen.')
+        break
+      }
+      db().prepare('UPDATE worlds SET port = ? WHERE id = ?').run(port, world.id)
+      count += 1
+    }
+    return count
+  })()
+  console.log(`[aboutm.ee] ${assigned} bestehende Welten haben einen Port bekommen, ${restarted} laufende werden neu gestartet.`)
+}
+
+/** Fehlt einer Welt noch der Port (etwa weil der Bereich voll war), wird er beim Start vergeben. */
 function withPort(world: World): World {
   if (world.port !== null) return world
   const port = db().transaction(() => {
@@ -171,11 +206,34 @@ export async function deleteWorld(world: World): Promise<void> {
   // unter den Füßen gelöscht, und der Container bliebe zurück.
   const current = reload(world)
   await runtime().destroy(current)
-  db().prepare('DELETE FROM worlds WHERE id = ?').run(world.id)
   // Der SRV-Eintrag muss mit weg — der Port wird neu vergeben und zeigte sonst auf eine fremde Welt.
-  await removeWorldRecord(current)
+  // Vormerken und Löschen in einem Zug: So ist der Port nie frei, solange der Eintrag noch besteht.
+  const record = db().transaction(() => {
+    const name = queueRecordRemoval(current)
+    db().prepare('DELETE FROM worlds WHERE id = ?').run(world.id)
+    return name
+  })()
+  await finishRecordRemoval(record)
   removeTree(worldDir(world.id))
   removeTree(backupsDir(world.id))
+}
+
+/**
+ * Löscht ein Konto mit allen Welten. Legt das Konto währenddessen in einem anderen Fenster noch eine
+ * Welt an, wird auch sie ordentlich gelöscht (Container, Dateien, SRV-Eintrag) — die Datenbank würde
+ * sie sonst beim Entfernen des Kontos stillschweigend mitnehmen und der Rest bliebe liegen.
+ */
+export async function deleteUserWithWorlds(userId: string): Promise<void> {
+  for (;;) {
+    const rest = listWorlds(userId)
+    if (rest.length === 0) break
+    for (const world of rest) await deleteWorld(world)
+  }
+  // Ab hier ohne Wartepunkt: Zwischen der Prüfung oben und dem Löschen kann keine Welt mehr entstehen.
+  db().transaction(() => {
+    db().prepare('UPDATE feedback SET user_id = NULL WHERE user_id = ?').run(userId)
+    db().prepare('DELETE FROM users WHERE id = ?').run(userId)
+  })()
 }
 
 // ───────────────────────── Einstellungen im laufenden Spiel ─────────────────────────

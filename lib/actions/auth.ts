@@ -8,7 +8,7 @@ import { hashPassword, verifyAgainstDummy, verifyPassword } from '../password'
 import { allowAttempt, isLimited } from '../ratelimit'
 import { turnstileProblem } from '../turnstile'
 import { normalizeEmail, passwordProblem } from '../validation'
-import { deleteWorld, listWorlds } from '../worlds'
+import { deleteUserWithWorlds } from '../worlds'
 import type { ActionState } from './state'
 
 const TEN_MINUTES = 10 * 60 * 1000
@@ -124,9 +124,7 @@ export async function deleteAccountAction(_previous: ActionState, formData: Form
     return { error: 'Dein Passwort stimmt nicht.' }
   }
 
-  for (const world of listWorlds(user.id)) await deleteWorld(world)
-  db().prepare('UPDATE feedback SET user_id = NULL WHERE user_id = ?').run(user.id)
-  db().prepare('DELETE FROM users WHERE id = ?').run(user.id)
+  await deleteUserWithWorlds(user.id)
   await destroySession()
   redirect('/?konto=geloescht')
 }

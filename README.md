@@ -53,12 +53,15 @@ Benutzerdefiniertes Token* mit diesen Berechtigungen:
 | --- | --- | --- |
 | Zone | DNS | Bearbeiten |
 | Zone | Zone | Lesen |
+| Zone | Zoneneinstellungen | Lesen *(optional — damit erkennt das Skript den SSL-Modus der Domain)* |
 | Konto | Turnstile | Bearbeiten |
 
 Es muss ein persönliches Token sein — mit einem Konto-Token lässt Cloudflare kein Turnstile-Widget anlegen. Das Token
 **bleibt auf dem Server gespeichert** (in `.env`, nur für root lesbar), weil die Website damit für jede neue Welt
 einen DNS-Eintrag anlegt. Beschränke es auf diese eine Domain. Wer mag, trägt nach der Installation ein zweites,
-engeres Token ein, das nur *Zone · DNS · Bearbeiten* darf.
+engeres Token ein, das nur *Zone · DNS · Bearbeiten* darf. Beim Aktualisieren überspringt das Skript dann den
+Cloudflare-Teil (es ist ja schon alles eingerichtet). Willst du später Adressen ändern, gib ihm einmalig wieder ein
+Token mit allen Rechten mit: `AM_CF_API_TOKEN=<Token> sudo -E ./install.sh`.
 
 Ohne API-Token geht es auch: Dann fragt das Skript nach den Turnstile-Schlüsseln, du trägst die DNS-Einträge selbst
 ein, und Spieler verbinden sich über `<Server-Adresse>:<Port>` statt über einen eigenen Namen je Welt.
@@ -107,6 +110,14 @@ Die Website liegt hinter Cloudflare; das öffentliche Zertifikat stellt Cloudfla
 deinem Server erzeugt Caddy selbst ein Zertifikat (`CADDY_TLS=internal`). Das passt zu den Cloudflare-Modi
 *Flexible* und *Full*. Steht deine Domain auf *Full (strict)* oder willst du die Website ohne Cloudflare-Proxy
 betreiben, setze in der `.env` `CADDY_TLS=<deine E-Mail>` — dann holt Caddy ein Zertifikat von Let's Encrypt.
+Wer die Seite über `http://` aufruft, wird auf `https://` umgeleitet.
+
+Solange die Website über den Cloudflare-Proxy läuft (orange Wolke), nimmt Caddy **nur Anfragen von Cloudflare** an:
+Die IP-Adresse deines Servers ist über die Minecraft-Adresse bekannt, und ohne diese Sperre ließe sich Cloudflares
+Schutz umgehen, indem man die Website direkt über die IP anspricht. Das Skript trägt dafür Cloudflares
+Adressbereiche in die `.env` ein (`ORIGIN_ALLOW`, `CLOUDFLARE_IPS`) und frischt sie bei jedem Lauf auf. Schaltest du
+den Proxy für die Website im Cloudflare-Dashboard aus, lass das Skript noch einmal laufen (oder leere
+`ORIGIN_ALLOW` und starte Caddy neu) — sonst bekommt niemand mehr eine Antwort.
 
 ### Vor dem Start erledigen
 
@@ -154,13 +165,14 @@ Es gibt zwei Ebenen:
    nach — ohne gültige Prüfung wird nichts angelegt.
 2. **Vor der ganzen Seite**: das stellst du im Cloudflare-Dashboard ein, nicht im Code. Unter **Security → WAF →
    Custom rules** eine Regel mit der Aktion *Managed Challenge* anlegen (z. B. für `/login`, `/register` und `/app`),
-   oder bei einem Angriff vorübergehend den *Under Attack Mode* einschalten.
+   oder bei einem Angriff vorübergehend den *Under Attack Mode* einschalten. Das greift für alles, was über
+   Cloudflare kommt — und anders kommt man an die Website nicht heran (siehe HTTPS).
 
 ## Betrieb
 
 | Aufgabe | Befehl |
 | --- | --- |
-| Aktualisieren | `git pull && sudo ./install.sh` |
+| Aktualisieren | `git pull && sudo ./install.sh` (immer über das Skript — es räumt auch Dienste früherer Stände ab) |
 | Logs der Website | `docker compose logs -f web` |
 | Laufende Welten | `docker ps --filter label=aboutmee.world` |
 | Stoppen | `docker compose down` (laufende Welten vorher im Admin-Bereich pausieren) |
@@ -184,7 +196,8 @@ Die Liste steht in `lib/versions.ts`. Den aktuellen Paper-Build einer Version ze
   weder im Dateimanager noch beim Starten, Sichern, Wiederherstellen oder Löschen (`lib/safe-fs.ts`). Die Tests in
   `tests/symlink-safety.test.ts` spielen genau diese Angriffe durch.
 - **Minecraft-Container** laufen ohne Root-Rechte, ohne Zusatzrechte (`cap-drop ALL`) und mit festen Grenzen für
-  RAM, CPU und Prozesse. Untereinander können sie sich nicht erreichen; Internetzugang haben sie.
+  RAM, CPU und Prozesse. Untereinander können sie sich nicht erreichen (eigenes Docker-Netz `aboutmee-worlds`
+  ohne Verkehr zwischen den Containern); Internetzugang haben sie.
 - **Die Website hat Zugriff auf den Docker-Socket** und damit volle Kontrolle über den Server. Betreibe auf diesem
   Server nichts anderes Schützenswertes und halte ihn aktuell.
 - **Ohne Turnstile-Schlüssel bleiben Formulare im Live-Betrieb gesperrt** — ein vergessener Schlüssel öffnet die

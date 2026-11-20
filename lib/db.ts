@@ -122,6 +122,11 @@ const MIGRATIONS: string[] = [
     created_at INTEGER NOT NULL
   );
   `,
+  `
+  -- Zeitpunkt, zu dem der Eintrag bei Cloudflare entfernt wurde. Der Port bleibt danach noch kurz gesperrt,
+  -- bis auch kein Resolver den alten Eintrag mehr kennt.
+  ALTER TABLE dns_cleanup ADD COLUMN removed_at INTEGER;
+  `,
 ]
 
 type Globals = { __amDb?: Database.Database }
